@@ -44,7 +44,7 @@ sudo bash /opt/vm2api/deploy/install.sh check
 sudo bash /opt/vm2api/deploy/install.sh changelog
 ```
 
-保留 `.env` / `vms/` / `data/`。不要 `docker rm` 槽。管理台 **设置 → 关于** 可复制同一条命令、看 changelog。指定版本：`--version v1.2.8`。若 changelog 提到 `wrap-cli/sync`，加 `--sync-wrap`。
+保留 `.env` / `vms/` / `data/`。不要 `docker rm` 槽。管理台 **设置 → 关于** 可复制同一条命令、看 changelog。指定版本：`--version v1.2.9`。若 changelog 提到 `wrap-cli/sync`，加 `--sync-wrap`。
 
 **手动：**
 
@@ -61,15 +61,15 @@ curl -sS --noproxy '*' http://127.0.0.1:8787/health
 
 二进制在仓内 `bin/`，Compose 会拷到挂载目录。`bin/kin-*` 必须 **755**。缺槽位系统镜像时会编 `kin-os/ubuntu:24.04`。
 
-槽位安装、同步和模板制作/晋升优先使用 `KIN_KERNEL_BIN` 指定的主内核；主内核文件不可用时才使用模板或槽内已有内核。更新主内核后，仍需同步并重启目标槽，使运行中的进程加载新文件。控制面重启本身不会替换正在运行的槽内进程。
-
-升级到 **v1.2.8** 见下面「已部署机升级到 1.2.8」。只重启控制面，不要 `docker rm` 槽。
+升级到 **v1.2.9** 见下面「已部署机升级到 1.2.9」。只重启控制面，不要 `docker rm` 槽。
 
 Docker Desktop / WSL 下 `curl 127.0.0.1:8787` 可能失败：
 
 ```bash
 docker exec vm2api python3 -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8787/health").read().decode())'
 ```
+
+槽位安装、同步和模板制作/晋升优先使用 `KIN_KERNEL_BIN` 指定的主内核；主内核文件不可用时才使用模板或槽内已有内核。更新主内核后，仍需同步并重启目标槽，使运行中的进程加载新文件。控制面重启本身不会替换正在运行的槽内进程。
 
 ## 上线后
 
@@ -130,13 +130,35 @@ curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install
 curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
 
 # 指定 tag
-sudo bash /opt/vm2api/deploy/install.sh upgrade --version v1.2.8
+sudo bash /opt/vm2api/deploy/install.sh upgrade --version v1.2.9
 
 # 只检查
 sudo bash /opt/vm2api/deploy/install.sh check
 ```
 
 面板：`GET /api/panel/version`、`GET /api/panel/changelog`、`POST /api/panel/update`（`{ confirm: true }` 才会在已挂 `docker.sock` 的机器上拉起升级助手）。容器里没有宿主机 git 仓时返回 `409 host_upgrade_required`，响应里带同一条 curl 命令。
+
+## 已部署机升级到 1.2.9
+
+1.2.9 只动**控制面**（thinking-only 残包同槽重试；一键安装补空账密；HTTP 裸 IP 登录不再丢会话）。不必换槽内 kernel，也不要 `docker rm` 槽。
+
+推荐：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+```
+
+手动：
+
+```bash
+cd /opt/vm2api
+git fetch --tags
+git checkout v1.2.9
+docker compose up -d --build
+curl -sS --noproxy '*' http://127.0.0.1:8787/health
+```
+
+本机 systemd：`git checkout v1.2.9` → `npm ci` → `pnpm -C web install --frozen-lockfile && npm run build:web` → `systemctl restart vm2api` **一次**。
 
 ## 已部署机升级到 1.2.8
 

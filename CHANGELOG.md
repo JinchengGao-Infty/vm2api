@@ -2,12 +2,19 @@
 
 ## Unreleased
 
-一键安装更稳妥：空 `.env` 补默认管理台 `admin` / `123456`（不覆盖已有密码）；构建前自动放行 `CHANGELOG.md`；HTTP 裸 IP 登录不再丢掉会话。
-
-- `deploy/install.sh`：空字段填默认账密与随机 API key；`.dockerignore` 缺 `!CHANGELOG.md` 则补上并在 compose 失败时重试；失败打印两类中文指引
-- 容器入口同样补空密码 / 空 API key
-- 面板：Bearer token 始终写入 localStorage；Cookie `Secure` 跟请求走；401 跳登录页，不再摊英文 Missing credentials
 - wrap CLI 的安装、同步、制作和晋升模板优先使用 `KIN_KERNEL_BIN` 指定的主内核，避免持久化模板或旧槽位把升级后的 kernel 覆盖回旧版。
+
+## 1.2.9 — 2026-09-20
+
+thinking-only 残包不再当 HTTP 200；一键安装与 HTTP 面板登录加固。不必换槽内 kernel。
+
+- `stream:false` 组包未完成不算 committed；只有 thinking / `stop_reason=null` 的假 `verified` 同槽再 hop，拿到正文再 200
+- 重试用尽才 502 `incomplete_response`，禁止 `terminal_state=verified` + 空正文
+- 槽满（`ready_slots=0`）等空槽，不 `docker restart`，也不往满槽塞请求
+- 一键安装：空 `.env` 补默认管理台 `admin` / `123456`（不覆盖已有密码）与随机 API key；缺 `!CHANGELOG.md` 则补上并在 compose 失败时重试
+- HTTP 裸 IP 登录：Bearer 写入 localStorage；Cookie `Secure` 跟请求走；401 回登录页，不再摊英文 Missing credentials
+
+已部署机升级：只更新控制面并重启一次。不必 `wrap-cli/sync`。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-129)
 
 ## 1.2.8 — 2026-09-20
 
