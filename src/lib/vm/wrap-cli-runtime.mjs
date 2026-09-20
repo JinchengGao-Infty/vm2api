@@ -201,12 +201,16 @@ function writeWrapper(destDir) {
   fs.renameSync(tmp, wrapper)
 }
 
+function kernelPayloadPath(dir) {
+  // Persisted templates and slot snapshots can outlive the installed release.
+  const configured = kernelBinPath()
+  if (isFile(configured)) return configured
+  const bin = path.join(dir, WRAP_KERNEL_BIN)
+  return isFile(bin) ? bin : path.join(dir, WRAP_KERNEL_WRAPPER)
+}
+
 function installKernelPayload(src, dest) {
-  const binSrc = isFile(path.join(src, WRAP_KERNEL_BIN))
-    ? path.join(src, WRAP_KERNEL_BIN)
-    : isFile(path.join(src, WRAP_KERNEL_WRAPPER))
-      ? path.join(src, WRAP_KERNEL_WRAPPER)
-      : kernelBinPath()
+  const binSrc = kernelPayloadPath(src)
   if (binSrc && isFile(binSrc)) {
     copyFile(binSrc, path.join(dest, WRAP_KERNEL_BIN))
   }
@@ -249,9 +253,7 @@ function copyWrapTree(src, dest) {
   }
   const glibc = path.join(src, WRAP_GLIBC_DIR)
   if (isDir(glibc)) copyDir(glibc, path.join(dest, WRAP_GLIBC_DIR))
-  const bin = isFile(path.join(src, WRAP_KERNEL_BIN))
-    ? path.join(src, WRAP_KERNEL_BIN)
-    : path.join(src, WRAP_KERNEL_WRAPPER)
+  const bin = kernelPayloadPath(src)
   if (isFile(bin)) copyFile(bin, path.join(dest, WRAP_KERNEL_BIN))
   writeWrapper(dest)
 }
@@ -320,11 +322,7 @@ export function makeWrapSample(projectRoot, { glibcFromDir = '' } = {}) {
   }
   fs.mkdirSync(dest, { recursive: true })
   const kernelDest = path.join(dest, WRAP_KERNEL_BIN)
-  const kernelSrc = isFile(kernelDest)
-    ? kernelDest
-    : isFile(path.join(dest, WRAP_KERNEL_WRAPPER))
-      ? path.join(dest, WRAP_KERNEL_WRAPPER)
-      : kernelBinPath()
+  const kernelSrc = kernelPayloadPath(dest)
   if (kernelSrc && isFile(kernelSrc) && path.resolve(kernelSrc) !== path.resolve(kernelDest)) {
     replaceFile(kernelSrc, kernelDest)
   }

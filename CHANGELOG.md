@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- wrap CLI 的安装、同步、制作和晋升模板优先使用 `KIN_KERNEL_BIN` 指定的主内核，避免持久化模板或旧槽位把升级后的 kernel 覆盖回旧版。
+
 ## 1.2.8 — 2026-09-20
 
 修复 compose build：`.dockerignore` 的 `*.md` 把 `CHANGELOG.md` 挡在构建上下文外，`COPY CHANGELOG.md` 失败。不必换槽内 kernel。
