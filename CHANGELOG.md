@@ -202,8 +202,6 @@ cli-hop 断点回到 1.2.0 rewrite。线上 kernel 是 `system_layout=zero`，�
 
 已部署机升级：只更新控制面并重启一次。不必 `wrap-cli/sync`。见 [DEPLOY.md](docs/DEPLOY.md#已部署机升级到-1210)
 
-- wrap CLI 的安装、同步、制作和晋升模板优先使用 `KIN_KERNEL_BIN` 指定的主内核，避免持久化模板或旧槽位把升级后的 kernel 覆盖回旧版。
-
 ## 1.2.9 — 2026-09-20
 
 thinking-only 残包不再当 HTTP 200；一键安装与 HTTP 面板登录加固。不必换槽内 kernel。

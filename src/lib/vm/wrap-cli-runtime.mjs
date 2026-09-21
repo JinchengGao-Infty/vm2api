@@ -324,7 +324,9 @@ function copyWrapTree(src, dest) {
   }
   const glibc = path.join(src, WRAP_GLIBC_DIR)
   if (isDir(glibc)) copyDir(glibc, path.join(dest, WRAP_GLIBC_DIR))
-  const bin = kernelPayloadPath(src, projectRoot)
+  const bin = isFile(path.join(src, WRAP_KERNEL_BIN))
+    ? path.join(src, WRAP_KERNEL_BIN)
+    : path.join(src, WRAP_KERNEL_WRAPPER)
   if (isFile(bin)) copyFile(bin, path.join(dest, WRAP_KERNEL_BIN))
   writeWrapper(dest)
 }
