@@ -48,3 +48,22 @@ isif 上的 vm-01 绑定 `px-local`，聊天和凭证刷新都应使用 VPS 本�
 构建目录、原文件、旧 compose 和脱敏验证结果位于 isif `/opt/vm2api/backups/local-refresh-20260920T122313Z/`。复建本次镜像使用该目录的 `image/Dockerfile`；后续完整升级仍从维护分支进行，不用历史 1.2.4 工作目录的普通全量构建替代本次镜像。
 
 部署前主代理空闲、服务器在途请求为 0。重建控制面期间，同一个 `kin-01` 容器也发生了重启；OMP 进程和会话未重启。部署后的实际凭证刷新返回 HTTP 200、`refreshed: true`，并写入新的过期时间；随后 `claude-opus-4-6` 的 `/v1/messages` 请求返回 HTTP 200、正文 `OK`、`end_turn`。
+
+
+## 升级到 1.3.6（2026-09-21）
+
+正式发布版本通过 GitHub Releases API 确认为 v1.3.6。维护分支将此 tag 合入为 `d01c291`，没有合并冲突，并已推送到 fork。保留 `kernelPayloadPath()` 的主内核优先规则；上游本地出口刷新支持继续保留。
+
+生产从自用 1.2.4 修复镜像升级为 `vm2api:1.3.6-infty`，镜像直接由维护分支代码构建。宿主机 `/opt/vm2api` 同步到维护分支，实际控制面 VERSION 为 1.3.6，并通过带 `ids: ["vm-01"]` 的 wrap-cli/sync 接口同步和重启活动槽位。内核配置的 native session 位为 20；原并发设置未修改，vm-02 保持停止。原额度阈值 100%、本地出口、Key、账号凭证和禁用 distill 检测的设置保留。新版 cookie-auth 已能在控制面镜像直接启动，旧 PyInstaller 兼容包装器不再使用。
+
+备份位于 isif `/opt/vm2api/backups/upgrade-1.3.6-20260921T052726Z/`，包括运行文件归档、在线 SQLite 备份、切换前 SQLite 备份、原部署差异与镜像信息。旧镜像保留。镜像构建目录 `/opt/vm2api-build-1.3.6` 保留用于复建。
+
+### 1h 缓存仍不兼容，部署默认修正为 5m
+
+升级后使用本机 OMP 的 provider URL、Key 和 User-Agent 进行真实连续工具调用。默认 1h 设置时，前两轮成功，第三轮稳定返回 502 incomplete_response；同一第三轮仅加 `x-kin-cache-ttl: 5m` 即恢复 HTTP 200、tool_use，读取 8,582 token 并新增 2,380 token 缓存。增加 max_tokens 或改为 SSE 均不能解决 1h 条件下的问题。
+
+实际响应始终将缓存写入记入 ephemeral_5m_input_tokens。生产已通过路由接口将 compatibility.cache_ttl 热更新为 5m，保留其他额度和并发设置。之前宣称 1h 的配置并未提供实际一小时缓存，不能在后续升级时直接恢复为 1h；需先以真实工具循环和响应中的 TTL 用量确认新内核支持。
+
+改为 5m 后，以默认配置重新执行三轮连续工具调用，全部返回 HTTP 200、tool_use，工具参数与对应轮次一致；缓存读取依次为 6,202、8,582、10,962 tokens。结果保存在本机 `/Users/gaojincheng/.omp/reports/vm2api-upgrade-1.3.6-verification.json`，只包含合成验证内容和用量，不含凭证。OMP 无须重启或新开会话。
+
+这属于当前 VM2 调用链的兼容问题。Anthropic [API 官方文档](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration)仍支持显式 `ttl: "1h"`；[Claude Code 官方文档](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets)也说明订阅套餐内的主对话默认请求 1h。官方要求混用 TTL 时，1h 断点必须在所有 5m 断点之前；当前尚未取得上游原始校验错误，不能把本次失败的具体原因写成已确定。
