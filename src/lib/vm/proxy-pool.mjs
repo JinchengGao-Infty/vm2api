@@ -391,14 +391,17 @@ export class ProxyPool {
   importParsed(records = [], extra = {}) {
     const added = []
     const skipped = []
-    const existing = new Set(this.state.proxies.map((p) => `${p.host}:${p.port}:${p.username || ''}`))
+    // Credentials can select distinct proxies at the same endpoint. Encode a
+    // tuple so colons inside credentials cannot collide with field separators.
+    const proxyKey = (p) => JSON.stringify([p.host, p.port, p.username || '', p.password || ''])
+    const existing = new Set(this.state.proxies.map(proxyKey))
     for (const parsed of records) {
       if (!parsed || parsed.__invalid || !parsed.host || !parsed.port) {
         const label = parsed?.__invalid || ''
         if (label) skipped.push({ line: label, reason: 'parse_failed' })
         continue
       }
-      const key = `${parsed.host}:${parsed.port}:${parsed.username || ''}`
+      const key = proxyKey(parsed)
       if (existing.has(key)) {
         skipped.push({ line: `${parsed.host}:${parsed.port}`, reason: 'duplicate' })
         continue
@@ -924,10 +927,11 @@ export class ProxyPool {
     if (!this.state.config.enabled) return
     const min = this.state.config.probe_interval_min || 10
     const ms = min * 60 * 1000
+    void this.probeAll({ onlyEnabled: true }).catch(() => {})
     this._timer = setInterval(() => {
       this.probeAll({ onlyEnabled: true }).catch(() => {})
     }, ms)
-    // optional: don't block startup with immediate full probe
+    this._timer.unref?.()
   }
 
   stopScheduler() {

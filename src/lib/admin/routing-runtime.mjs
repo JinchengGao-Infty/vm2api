@@ -24,6 +24,7 @@ import { markVmRefreshError } from '../oauth/oauth-credentials.mjs'
 import { shouldMarkMissingRefresh } from '../pool/schedule-eligibility.mjs'
 import { normalizeCodexRouting } from '../protocol/codex-route.mjs'
 import { rustKernelHealth } from '../transport/rust-kernel-client.mjs'
+import { writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 
 export function createRoutingRuntime(ctx) {
   const getRouting = () => (typeof ctx.getRoutingConfig === 'function' ? ctx.getRoutingConfig() : ctx.routingConfig)
@@ -85,7 +86,7 @@ export function createRoutingRuntime(ctx) {
     const applied = { updated: 0, skipped: 0 }
     for (const vm of listVms(ctx.cfg.paths.project)) {
       if (vm.codex_kernel || vm.platform === 'openai' || vm.family === 'codex') continue
-      if (vm.session_slots_override) {
+      if (vm.session_slots_override === true) {
         applied.skipped += 1
         continue
       }
@@ -223,6 +224,14 @@ export function createRoutingRuntime(ctx) {
     getNotify()?.setConfig(routingConfig.notify)
   }
 
+  function syncKernelCacheTtl(routingConfig) {
+    for (const { id } of listVms(ctx.cfg.paths.project)) {
+      const vm = getVm(ctx.cfg.paths.project, id)
+      if (!vm || vm.platform === 'openai' || vm.family === 'codex') continue
+      writeKernelConfig(ctx.cfg.paths.project, vm, { routing: routingConfig })
+    }
+  }
+
   function persistRoutingPatch(body = {}) {
     let routingConfig = getRouting()
     const prevOfficialCc = routingConfig.official_cc
@@ -275,15 +284,18 @@ export function createRoutingRuntime(ctx) {
     ctx.stickyRouter.reloadConfig(routingConfig)
     ctx.accountQuota.reloadConfig(routingConfig)
     getPool()?.reloadConfig?.(poolSchedulerConfig())
+    if (body.compatibility && Object.prototype.hasOwnProperty.call(body.compatibility, 'cache_ttl')) {
+      syncKernelCacheTtl(routingConfig)
+    }
     if (body.pool || body.failover) initPoolRuntime()
     try {
       return {
         concurrency: applyRoutingTierConcurrency(routingConfig.tiers),
         rpm: applyRoutingTierRpm(routingConfig.tiers),
         session_slots:
-          previousSessionSlots === nextSessionSlots
-            ? { updated: 0, skipped: 0 }
-            : applyRoutingSessionSlots(nextSessionSlots),
+          body.inference && Object.prototype.hasOwnProperty.call(body.inference, 'session_slots')
+            ? applyRoutingSessionSlots(nextSessionSlots)
+            : { updated: 0, skipped: 0 },
       }
     } catch (err) {
       console.error(

@@ -69,7 +69,7 @@ Docker Desktop / WSL 下 `curl 127.0.0.1:8787` 可能失败：
 docker exec vm2api python3 -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8787/health").read().decode())'
 ```
 
-槽位安装、同步和模板制作/晋升优先使用 `KIN_KERNEL_BIN` 指定的主内核；主内核文件不可用时才使用模板或槽内已有内核。更新主内核后，仍需同步并重启目标槽，使运行中的进程加载新文件。控制面重启本身不会替换正在运行的槽内进程。
+槽位安装、同步和模板制作/晋升优先使用 `KIN_KERNEL_BIN` / `bin/kin-kernel`；母样本或槽内快照只在主内核不可用时使用。更新或上传主内核后，仍需同步并重启目标槽。控制面重启本身不会替换正在运行的槽内进程。
 
 ## 上线后
 

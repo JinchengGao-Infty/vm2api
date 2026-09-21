@@ -58,6 +58,24 @@ function poolError(code, message, details = {}) {
   }
 }
 
+function fableRequiresMaxError(details = {}) {
+  return {
+    ok: false,
+    status: 429,
+    via: 'pool-failover',
+    terminalState: 'exhausted',
+    body: {
+      type: 'error',
+      error: {
+        type: 'rate_limit_error',
+        code: 'fable_requires_max',
+        message: 'Fable requires an available Max account',
+        details,
+      },
+    },
+  }
+}
+
 function selectedHasRefresh(selected) {
   if (selected?.hasRefresh === true || selected?.hasRefresh === false) return selected.hasRefresh
   const cred = selected?.workerStatus?.credential || selected?.state?.worker_status?.credential || {}
@@ -143,6 +161,26 @@ function sleepWithSignal(ms, signal) {
   })
 }
 
+function waitForSessionTurn(previous, signal) {
+  if (!signal) return previous.catch(() => {})
+  if (signal.aborted)
+    return Promise.reject(Object.assign(new Error('Request was cancelled'), { code: 'request_cancelled' }))
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cleanup()
+      reject(Object.assign(new Error('Request was cancelled'), { code: 'request_cancelled' }))
+    }
+    const cleanup = () => signal.removeEventListener?.('abort', onAbort)
+    signal.addEventListener?.('abort', onAbort, { once: true })
+    previous
+      .catch(() => {})
+      .then(() => {
+        cleanup()
+        resolve()
+      })
+  })
+}
+
 function isUnfinishedLastResult(result, policy) {
   if (!result) return false
   if (policy?.reason === 'incomplete_assistant') return true
@@ -224,6 +262,7 @@ export class FailoverRunner {
     this.onProxyFailure = onProxyFailure
     this.onCredentialFailure = onCredentialFailure
     this.onFablePlanDenied = onFablePlanDenied
+    this.sessionTails = new Map()
   }
 
   forgetCredential(selected, policy) {
@@ -238,7 +277,29 @@ export class FailoverRunner {
     }
   }
 
-  async run({
+  async run(args = {}) {
+    const sessionKey = String(args.stickyKey || '')
+    if (!sessionKey) return this.runOnce(args)
+    const previous = this.sessionTails.get(sessionKey) || Promise.resolve()
+    let releaseTurn
+    const turn = new Promise((resolve) => {
+      releaseTurn = resolve
+    })
+    const tail = previous.catch(() => {}).then(() => turn)
+    this.sessionTails.set(sessionKey, tail)
+    try {
+      await waitForSessionTurn(previous, args.signal)
+      return await this.runOnce(args)
+    } catch (error) {
+      if (error?.code === 'request_cancelled') return poolError('request_cancelled', 'Request was cancelled')
+      throw error
+    } finally {
+      releaseTurn()
+      if (this.sessionTails.get(sessionKey) === tail) this.sessionTails.delete(sessionKey)
+    }
+  }
+
+  async runOnce({
     requestId,
     canonicalBody,
     model,
@@ -312,6 +373,15 @@ export class FailoverRunner {
         }
         throw error
       }
+      if (!selected?.ok && selected?.reason === 'fable_requires_max') {
+        return fableRequiresMaxError({
+          wait_ms: selected?.waitMs ?? selected?.wait_ms ?? 0,
+          eligible: selected?.eligible ?? 0,
+          available: selected?.available ?? 0,
+          attempt_count: attemptNo - 1,
+        })
+      }
+
       if (!selected?.ok) {
         return preferLastResult(
           lastResult,
@@ -474,6 +544,21 @@ export class FailoverRunner {
           }
           continue
         }
+        // A terminal 2xx without a complete assistant message is request/CLI
+        // state, not account health. One same-slot recovery is useful; replaying
+        // the same conversation across the pool breaks affinity and multiplies cost.
+        if (policy.reason === 'incomplete_assistant') {
+          return {
+            ...incompleteAssistantClientError(result),
+            via: result?.via || 'pool-failover',
+            accountId: selected.accountId,
+            vmId: selected.vmId,
+            attemptCount: attemptNo,
+            finalState: 'incomplete',
+            policy,
+          }
+        }
+
         excluded.add(selected.accountId)
         excluded.add(selected.vmId)
         accountSwitches++

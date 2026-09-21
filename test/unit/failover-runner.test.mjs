@@ -423,6 +423,35 @@ test('thinking-only hop retries same account and returns the later text', async 
   assert.equal(result.body.stop_reason, 'end_turn')
 })
 
+test('repeated incomplete hop stops on the original VM after one recovery', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({ scheduler, config: { same_account_retry_delay_ms: 0 } })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-incomplete-affinity',
+    canonicalBody: { model: 'claude-opus-test' },
+    model: 'claude-opus-test',
+    stickyKey: 'session-affinity',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.vmId)
+      return {
+        ok: false,
+        status: 200,
+        committed: false,
+        terminalState: 'incomplete',
+        body: { type: 'message', role: 'assistant', content: [], stop_reason: null },
+      }
+    },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 502)
+  assert.equal(result.body.error.code, 'incomplete_response')
+  assert.equal(result.attemptCount, 2)
+  assert.equal(result.vmId, 'vm-01')
+  assert.deepEqual(seen, ['vm-01', 'vm-01'])
+  assert.equal(scheduler.selectCalls, 2)
+})
+
 test('fast 502 retries the same account once without cooldown', async () => {
   const scheduler = new Scheduler([candidate(1)])
   const runner = new FailoverRunner({
@@ -704,6 +733,27 @@ test('empty pool without a prior hop stays account_pool_exhausted', async () => 
   assert.equal(result.body.error.details.sticky_cleared, false)
 })
 
+test('fable without an eligible Max account returns a dedicated HTTP 429', async () => {
+  const scheduler = {
+    async selectAndReserve() {
+      return { ok: false, reason: 'fable_requires_max', waitMs: 0, eligible: 0, available: 0 }
+    },
+    markCooldown() {},
+    markSuccess() {},
+  }
+  const runner = new FailoverRunner({ scheduler })
+  const result = await runner.run({
+    requestId: 'req-fable-no-max',
+    canonicalBody: { model: 'claude-fable-5' },
+    model: 'claude-fable-5',
+    callAttempt: () => success(),
+  })
+  assert.equal(result.status, 429)
+  assert.equal(result.body.error.type, 'rate_limit_error')
+  assert.equal(result.body.error.code, 'fable_requires_max')
+  assert.match(result.body.error.message, /Max account/i)
+})
+
 test('pool exhaustion details include the scheduler snapshot', async () => {
   const scheduler = {
     async selectAndReserve() {
@@ -765,6 +815,58 @@ test('preferLastResult does not deliver thinking-only as HTTP 200', async () => 
   assert.equal(result.status, 502)
   assert.equal(result.body.error.code, 'incomplete_response')
   assert.notEqual(result.status, 200)
+})
+
+test('same sticky session requests execute serially', async () => {
+  const scheduler = new Scheduler([candidate(1)])
+  const runner = new FailoverRunner({ scheduler })
+  let active = 0
+  let peak = 0
+  const callAttempt = async () => {
+    active += 1
+    peak = Math.max(peak, active)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    active -= 1
+    return success()
+  }
+  const request = (requestId) =>
+    runner.run({
+      requestId,
+      canonicalBody: { model: 'claude-opus-test' },
+      model: 'claude-opus-test',
+      stickyKey: 'shared-session',
+      callAttempt,
+    })
+  const [first, second] = await Promise.all([request('req-serial-1'), request('req-serial-2')])
+  assert.equal(first.ok, true)
+  assert.equal(second.ok, true)
+  assert.equal(peak, 1)
+})
+
+test('different sticky sessions still execute concurrently', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({ scheduler })
+  let active = 0
+  let peak = 0
+  const callAttempt = async () => {
+    active += 1
+    peak = Math.max(peak, active)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    active -= 1
+    return success()
+  }
+  await Promise.all(
+    ['session-a', 'session-b'].map((stickyKey) =>
+      runner.run({
+        requestId: `req-${stickyKey}`,
+        canonicalBody: { model: 'claude-opus-test' },
+        model: 'claude-opus-test',
+        stickyKey,
+        callAttempt,
+      }),
+    ),
+  )
+  assert.equal(peak, 2)
 })
 
 test('fable 403 marks pro and failovers without credential cooldown', async () => {

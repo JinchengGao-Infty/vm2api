@@ -51,6 +51,7 @@ import {
   resolveSlotPersonaPreset,
   slotPersonaModeOverride,
 } from '../vm/slot-engine.mjs'
+import { isValidVmId } from '../vm/vm-file.mjs'
 import {
   makeError,
   mapUpstreamError,
@@ -58,9 +59,9 @@ import {
   validateRequestBody,
   mapModelError,
   isClientCancelledResult,
-  isCompleteAssistantMessage,
   isIncompleteAssistantMessage,
   finalizeAssembledAssistantHop,
+  mergeAssembledAssistantHop,
   incompleteAssistantClientError,
   ErrorType,
   ErrorCode,
@@ -257,19 +258,7 @@ export function createHandleProtocol(deps) {
         applyClaudeSSELineToMessage(restoreToolNamesInSSELine(line, toolNames), assembler)
       },
     })
-    if (assembler.message) {
-      const localComplete = isCompleteAssistantMessage({
-        body: assembler.message,
-        stopReason: assembler.message.stop_reason,
-      })
-      const workerComplete = isCompleteAssistantMessage(workerResult)
-      if (localComplete || !workerComplete) {
-        workerResult.body = assembler.message
-        if (assembler.message.usage) workerResult.usage = assembler.message.usage
-        if (assembler.message.model) workerResult.model = assembler.message.model
-        if (assembler.message.stop_reason) workerResult.stopReason = assembler.message.stop_reason
-      }
-    }
+    Object.assign(workerResult, mergeAssembledAssistantHop(workerResult, assembler.message))
     if (workerResult?.body) {
       workerResult.body = restoreToolNames(workerResult.body, toolNames)
     }
@@ -722,7 +711,7 @@ export function createHandleProtocol(deps) {
     // stream:false only changes the client response shape (assembled JSON).
     const deliveryMode = requestedDelivery === 'verified' ? 'verified' : 'realtime'
     const pinVmRaw = String(req.headers['x-kin-vm'] || '').trim()
-    const pinVmId = req.apiKeyKind === 'master' && /^vm-[a-z0-9-]+$/i.test(pinVmRaw) ? pinVmRaw : null
+    const pinVmId = req.apiKeyKind === 'master' && isValidVmId(pinVmRaw) ? pinVmRaw : null
     // Pin is panel test-chat / diagnostics (manage). Unpinned /v1 is dispatch.
     const ownerScope = pinVmId ? { type: 'any' } : ownerScopeFromRequest(req, apiKeyStore?.users)
     const healthReal = isHealthRealBypass(req.headers)
@@ -752,25 +741,31 @@ export function createHandleProtocol(deps) {
           let hopBody = body
           if (cliHop) {
             const repaired = extra.repaired === true
-            const inject = String(routingNow?.compatibility?.persona_inject ?? '')
-              .trim()
-              .toLowerCase()
-            const cliAppliesNodePersona =
-              !officialTraffic &&
-              Boolean(inject) &&
-              inject !== 'none' &&
-              inject !== 'off' &&
-              inject !== 'false' &&
-              inject !== 'zero'
-            hopBody = prepareCliHopBody(repaired ? body : cliAppliesNodePersona ? body : personaIn, {
+            const resolvedPersona = resolveSlotPersonaPreset(selected.vm, routingNow)
+            if (!officialTraffic) {
+              hopBody = applyCrsUnofficialPersona(structuredClone(personaIn), {
+                officialClient: false,
+                routingFile: routingConfigPath,
+                mode: resolvedPersona,
+                headers: req.headers,
+                sessionId: outboundSessionId,
+                model: personaIn?.model,
+                cliVersion: OFFICIAL_CLI_VERSION,
+                identity,
+              })
+            }
+            const cliAppliesNodePersona = !officialTraffic && resolvedPersona !== 'zero'
+            hopBody = prepareCliHopBody(repaired ? body : hopBody, {
               stream: upstreamStream,
               repaired,
-              cacheTtl,
               cacheBreakpoints,
               cacheControlLimit: Number(getRouting()?.compatibility?.cache_control_limit) || 4,
+              cacheTtl,
               unofficial: !officialTraffic,
             })
             hopBody = await materializeRemoteImageSources(hopBody)
+            if (getRouting()?.logging?.mode === 'debug') logBag.outbound_body = hopBody
+
             const cliHide = personaHideForCliZero(personaIn, hopBody, {
               officialClient: officialTraffic,
               timezone: selected.vm?.timezone || selected.vm?.fingerprint?.timezone,
@@ -840,6 +835,7 @@ export function createHandleProtocol(deps) {
               signal,
               deliveryMode: attemptDelivery,
               toolNames: attemptMeta?.toolNames || {},
+              cacheTtl,
               want1m,
               routing: getRouting(),
               noGoFallback: !!pinVmId,
@@ -867,6 +863,7 @@ export function createHandleProtocol(deps) {
           try {
             return await dispatchStreamInference({
               exec: candidate.exec,
+              cacheTtl,
               body,
               reqHeaders: req.headers,
               timeoutMs: cfg.limits.upstream_timeout_ms,
