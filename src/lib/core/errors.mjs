@@ -93,6 +93,11 @@ const POOL_CAPACITY_CODES = new Set([
 ])
 
 const POOL_CAPACITY_MESSAGE = /no eligible|no ready api|account pool|号池没有|无可用账号|eligible claude/i
+const WRAP_CONNECTION_MESSAGE = /provider error:.*connection error/i
+
+export function isWrapConnectionError(message = '') {
+  return WRAP_CONNECTION_MESSAGE.test(String(message || ''))
+}
 
 export function isPoolCapacityError(code, message = '') {
   if (POOL_CAPACITY_CODES.has(String(code || '').trim())) return true
@@ -170,9 +175,11 @@ export function assistantVisibleOutput(body) {
   const content = body?.content || body?.message?.content
   if (!Array.isArray(content)) return false
   for (const block of content) {
-    if (block?.type === 'text' && String(block.text || '').trim()) return true
-    if (block?.type === 'tool_use') return true
-    if (block?.type === 'refusal' && String(block.refusal || block.text || '').trim()) return true
+    const kind = String(block?.type || '')
+    if (kind === 'text' && String(block.text || '').trim()) return true
+    if (kind === 'tool_use' || kind === 'server_tool_use' || kind === 'mcp_tool_use') return true
+    if (kind.endsWith('_tool_use')) return true
+    if (kind === 'refusal' && String(block.refusal || block.text || '').trim()) return true
   }
   return false
 }
@@ -196,11 +203,10 @@ export function isIncompleteAssistantMessage(result = {}) {
 }
 
 export function finalizeAssembledAssistantHop(result = {}) {
-  if (isIncompleteAssistantMessage(result)) {
+  if (isCompleteAssistantMessage(result)) return result?.ok ? result : { ...result, ok: true }
+  if (isIncompleteAssistantMessage(result) || result?.ok) {
     return { ...result, ok: false, committed: false, terminalState: 'incomplete' }
   }
-  if (result?.ok) return result
-  if (isCompleteAssistantMessage(result)) return { ...result, ok: true }
   return result
 }
 
@@ -246,6 +252,22 @@ export function mapUpstreamError(status, body, headers = {}) {
       message: String(msg || 'Client closed the connection'),
       status: 499,
       details: { upstream_status: status },
+    })
+  }
+  if (inboundCode === 'slot_busy' || /rust kernel has no free slot/i.test(String(msg || ''))) {
+    return makeError({
+      type: ErrorType.OVERLOADED,
+      code: 'slot_busy',
+      message: String(msg || 'rust kernel has no free slot'),
+      status: 503,
+    })
+  }
+  if (inboundCode === 'wrap_connection_error' || isWrapConnectionError(msg)) {
+    return makeError({
+      type: ErrorType.API,
+      code: 'wrap_connection_error',
+      message: String(msg || 'wrap CLI connection error'),
+      status: 503,
     })
   }
 

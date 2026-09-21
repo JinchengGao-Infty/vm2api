@@ -15,7 +15,7 @@ import {
 } from './rust-kernel-client.mjs'
 import { OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
 import { setVmSchedulable } from '../vm/vm-registry.mjs'
-import { resolveCliSystemLayout } from '../vm/slot-engine.mjs'
+import { KERNEL_NATIVE_SLOT_COUNT, resolveCliSystemLayout } from '../vm/slot-engine.mjs'
 import { ensureOfficialCredentialLink, slotUidGidFromHomeDir } from '../oauth/oauth-credentials.mjs'
 
 const starts = new Map()
@@ -24,7 +24,7 @@ const CONTAINER_KERNEL_CONFIG = '/run/kin/kernel.json'
 export const CONTAINER_CLAUDE_BIN = '/home/kincli/.kin/cli-node'
 
 export const WRAP_SLOT_MIN = 1
-export const WRAP_SLOT_MAX = 2
+export const WRAP_SLOT_MAX = KERNEL_NATIVE_SLOT_COUNT
 export const WEDGED_READY_WAIT_MS = 3000
 
 /** Pre-open native slots. 20 multiplexed CLI streams over one residential SOCKS incomplete-storm. */
@@ -206,12 +206,12 @@ async function waitForHealthOrExit(exec, { timeoutMs, container, runDockerExec, 
   return { ok: false, reason: 'health_timeout', health: last, error: last?.error || 'rust kernel health timeout' }
 }
 
-export async function ensureRustKernel(exec, { timeoutMs = 30000, runDockerExec = runDocker } = {}) {
+export async function ensureRustKernel(exec, { timeoutMs = 30000, runDockerExec = runDocker, force = false } = {}) {
   const vmId = exec?.vmId || exec?.vm?.id || 'unknown'
   const pending = starts.get(vmId)
-  if (pending) return pending.promise
+  if (pending && !force) return pending.promise
   const control = { cancelled: false }
-  const promise = startRustKernel(exec, { timeoutMs, vmId, control, runDockerExec })
+  const promise = startRustKernel(exec, { timeoutMs, vmId, control, runDockerExec, force })
   const start = { promise, control }
   starts.set(vmId, start)
   try {
@@ -280,7 +280,7 @@ export async function restartRustKernel(exec, { timeoutMs = 30000, runDockerExec
   try {
     if (paths.socketPath) fs.rmSync(paths.socketPath, { force: true })
   } catch {}
-  return ensureRustKernel(exec, { timeoutMs, runDockerExec })
+  return ensureRustKernel(exec, { timeoutMs, runDockerExec, force: true })
 }
 
 export const WRAP_RECYCLE_COOLDOWN_MS = 30_000
@@ -290,12 +290,14 @@ const wrapRecycleAt = new Map()
 const wrapRecyclePending = new Map()
 const wrapLastHopAt = new Map()
 const wrapInflight = new Map()
+const wrapRecycleDeferred = new Map()
 
 export function resetWrapRecycleState() {
   wrapRecycleAt.clear()
   wrapRecyclePending.clear()
   wrapLastHopAt.clear()
   wrapInflight.clear()
+  wrapRecycleDeferred.clear()
 }
 
 function wrapVmId(exec) {
@@ -318,14 +320,31 @@ export function endWrapHop(exec, now = Date.now()) {
   const id = wrapVmId(exec)
   if (!id) return
   const n = (wrapInflight.get(id) || 1) - 1
-  if (n <= 0) wrapInflight.delete(id)
-  else wrapInflight.set(id, n)
+  if (n <= 0) {
+    wrapInflight.delete(id)
+    const deferred = wrapRecycleDeferred.get(id)
+    if (deferred) {
+      wrapRecycleDeferred.delete(id)
+      try {
+        deferred.recycle(deferred.exec)
+      } catch {}
+    }
+  } else {
+    wrapInflight.set(id, n)
+  }
   wrapLastHopAt.set(id, now)
 }
 
 export function wrapHopInflight(exec) {
   const id = wrapVmId(exec)
   return id ? wrapInflight.get(id) || 0 : 0
+}
+
+export function deferWrapRecycle(exec, recycle = scheduleWrapRecycle) {
+  const id = wrapVmId(exec)
+  if (!id) return { ok: false, skipped: true, reason: 'missing_vm' }
+  wrapRecycleDeferred.set(id, { exec, recycle })
+  return { ok: true, deferred: true }
 }
 
 export function wrapIdleMs(exec, now = Date.now()) {
@@ -390,7 +409,7 @@ function bootWaitMs(timeoutMs, { pid1Kernel, wedged }) {
   return cap
 }
 
-async function startRustKernel(exec, { timeoutMs, control, runDockerExec }) {
+async function startRustKernel(exec, { timeoutMs, control, runDockerExec, force = false }) {
   if (exec?.homeDir) {
     const ids = slotUidGidFromHomeDir(exec.homeDir)
     ensureOfficialCredentialLink(exec.homeDir, ids || {})
@@ -404,11 +423,11 @@ async function startRustKernel(exec, { timeoutMs, control, runDockerExec }) {
   const slotMismatch =
     !!paths.configPath && Number(readExistingKernelConfig(paths.configPath).slots_per_worker) !== WRAP_SLOT_MAX
   const occupied = rustKernelBusy(existing) || wrapHopInflight(exec) > 0
-  if (occupied && !staleWrap && !staleTicket && !slotMismatch) {
+  if (!force && occupied && !staleWrap && !staleTicket && !slotMismatch) {
     const reconcile = await reconcileCliHopRuntime(exec, { runDockerExec })
     return { ok: true, reason: 'busy', health: existing, reconcile }
   }
-  if (rustKernelReachable(existing) && !staleWrap && !staleTicket && !slotMismatch) {
+  if (!force && rustKernelReachable(existing) && !staleWrap && !staleTicket && !slotMismatch) {
     const reconcile = await reconcileCliHopRuntime(exec, { runDockerExec })
     return { ok: true, reason: 'already_up', health: existing, reconcile }
   }
@@ -418,7 +437,7 @@ async function startRustKernel(exec, { timeoutMs, control, runDockerExec }) {
   if (!container) return { ok: false, reason: 'container_missing' }
   const wedged = rustKernelProcessUp(existing) && !rustKernelReachable(existing) && !occupied
   const pid1Kernel = await containerKernelIsPid1(container, runDockerExec)
-  const waitMs = staleWrap || staleTicket || slotMismatch ? 0 : bootWaitMs(timeoutMs, { pid1Kernel, wedged })
+  const waitMs = force || staleWrap || staleTicket || slotMismatch ? 0 : bootWaitMs(timeoutMs, { pid1Kernel, wedged })
   if (waitMs > 0) {
     const waited = await waitForHealth(exec, waitMs)
     if (waited?.ok) {

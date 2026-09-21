@@ -4,6 +4,7 @@ import {
   mapUpstreamError,
   rewritePoolErrorForClient,
   isPoolCapacityError,
+  isWrapConnectionError,
   isAssistantMessageBody,
   isCompleteAssistantMessage,
   isIncompleteAssistantMessage,
@@ -88,6 +89,20 @@ test('thinking-only assistant is an envelope but not a complete message', () => 
   assert.equal(finalized.terminalState, 'incomplete')
 })
 
+test('server_tool_use plus stop_reason is a complete assistant hop', () => {
+  const complete = {
+    ok: false,
+    body: {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'news' } }],
+      stop_reason: 'tool_use',
+    },
+  }
+  assert.equal(isCompleteAssistantMessage(complete), true)
+  assert.equal(finalizeAssembledAssistantHop(complete).ok, true)
+})
+
 test('text plus stop_reason is a complete assistant hop', () => {
   const complete = {
     ok: false,
@@ -102,12 +117,62 @@ test('text plus stop_reason is a complete assistant hop', () => {
   assert.equal(finalizeAssembledAssistantHop(complete).ok, true)
 })
 
+test('ok text without stop_reason is finalized as incomplete', () => {
+  const finalized = finalizeAssembledAssistantHop({
+    ok: true,
+    terminalState: 'verified',
+    body: {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'partial' }],
+    },
+  })
+  assert.equal(finalized.ok, false)
+  assert.equal(finalized.terminalState, 'incomplete')
+})
+
+test('ok non-assistant envelope is finalized as incomplete', () => {
+  const finalized = finalizeAssembledAssistantHop({
+    ok: true,
+    terminalState: 'verified',
+    body: { output_text: 'assembled over an error', error: { message: 'upstream failed' } },
+  })
+  assert.equal(finalized.ok, false)
+  assert.equal(finalized.terminalState, 'incomplete')
+})
+
 test('incomplete_response maps to HTTP 502', () => {
   const mapped = mapUpstreamError(502, {
-    error: { type: 'api_error', code: 'incomplete_response', message: 'Assistant hop ended without visible output or stop_reason' },
+    error: {
+      type: 'api_error',
+      code: 'incomplete_response',
+      message: 'Assistant hop ended without visible output or stop_reason',
+    },
   })
   assert.equal(mapped.status, 502)
   assert.equal(mapped.body.error.code, 'incomplete_response')
+})
+
+test('wrap Connection error is not upstream', () => {
+  assert.equal(isWrapConnectionError('provider error: provider error: Connection error.'), true)
+  const mapped = mapUpstreamError(200, {
+    type: 'error',
+    error: { type: 'api_error', message: 'provider error: provider error: Connection error.' },
+  })
+  assert.equal(mapped.status, 503)
+  assert.equal(mapped.body.error.code, 'wrap_connection_error')
+  assert.notEqual(mapped.body.error.type, 'upstream_error')
+})
+
+test('kernel slot_busy is overloaded, not upstream', () => {
+  const mapped = mapUpstreamError(503, {
+    type: 'error',
+    error: { type: 'worker_error', code: 'slot_busy', message: 'rust kernel has no free slot' },
+  })
+  assert.equal(mapped.status, 503)
+  assert.equal(mapped.body.error.type, 'overloaded_error')
+  assert.equal(mapped.body.error.code, 'slot_busy')
+  assert.match(mapped.body.error.message, /no free slot/)
 })
 
 test('isPoolCapacityError covers internal empty-pool codes', () => {

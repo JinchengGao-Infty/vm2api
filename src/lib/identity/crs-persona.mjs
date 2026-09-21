@@ -32,6 +32,7 @@ import { createHash } from 'node:crypto'
 import { resolveWorkstationProfile } from './workstation-profile.mjs'
 import fs from 'node:fs'
 import { uuidFromSeed } from './identity-rewrite.mjs'
+import { CCH_PLACEHOLDER } from './cch.mjs'
 import { CLAUDE_CLI_UA_RE, isOfficialClaudeUa } from './official-claude-ua.mjs'
 import {
   AGENT_EXPANSION_CACHE_CONTROL,
@@ -75,7 +76,7 @@ export const CRS_OFFICIAL_CLI_SYSTEM = "You are Claude Code, Anthropic's officia
 export const CRS_OFFICIAL_SYSTEM = CRS_OFFICIAL_AGENT_IDENTITY
 /** 0注入 prompt_version 短身份句。cl100k 计 8 token，必带 Anthropic 与 Claude。 */
 export const CRS_COMPACT_IDENTITY = 'You are Anthropic Claude Agent SDK.'
-export const DEFAULT_CLI_VERSION = '2.1.263'
+export const DEFAULT_CLI_VERSION = '2.1.278'
 export const PERSONA_MODES = Object.freeze(['rewrite', 'official_prompt', 'overwrite', 'zero', 'append', 'none'])
 export const DEFAULT_PERSONA_MODE = 'rewrite'
 export const DEFAULT_PERSONA_PARK = true
@@ -321,13 +322,7 @@ export function computeClaudeCodeFingerprint(firstUserText = '', cliVersion = DE
     .slice(0, 3)
 }
 
-export function computeClaudeCodeCch(firstUserText = '', cliVersion = DEFAULT_CLI_VERSION) {
-  const ver = parseCliVersion(cliVersion)
-  return createHash('sha256')
-    .update(`${FINGERPRINT_SALT}:cch:${firstUserText || ''}:${ver}`, 'utf8')
-    .digest('hex')
-    .slice(0, 5)
-}
+export { CCH_PLACEHOLDER, computeClaudeCodeCch, sealClaudeCodeCch } from './cch.mjs'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -342,9 +337,8 @@ export function billingPromptId(sessionId = '', firstUserText = '', cliVersion =
 export function buildBillingAttributionText(firstUserText, cliVersion = DEFAULT_CLI_VERSION, sessionId = '') {
   const ver = parseCliVersion(cliVersion)
   const fp = computeClaudeCodeFingerprint(firstUserText ?? '', ver)
-  const cch = computeClaudeCodeCch(firstUserText ?? '', ver)
   const promptId = billingPromptId(sessionId, firstUserText, ver)
-  return `x-anthropic-billing-header: cc_version=${ver}.${fp}; cc_entrypoint=sdk-cli; cch=${cch}; cc_prompt_id=${promptId};`
+  return `x-anthropic-billing-header: cc_version=${ver}.${fp}; cc_entrypoint=sdk-cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${promptId};`
 }
 
 function extractSystemTexts(system) {

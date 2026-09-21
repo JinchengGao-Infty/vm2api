@@ -30,6 +30,7 @@ import { AboutPane } from '@/features/settings/about-pane'
 import { BackupPane } from '@/features/settings/backup-pane'
 import { CacheBreakpointsPane } from '@/features/settings/cache-breakpoints-pane'
 import { CredentialWeightPane } from '@/features/settings/credential-weight-pane'
+import { GptPane } from '@/features/settings/gpt-pane'
 import { HealthPane } from '@/features/settings/health-pane'
 import { KernelRoutingPane } from '@/features/settings/kernel-routing-pane'
 import { LogsPane } from '@/features/settings/logs-pane'
@@ -267,7 +268,10 @@ export function SettingsPage() {
                       <CardTitle>配额</CardTitle>
                     </CardHeader>
                     <CardContent className='divide-y'>
-                      <SettingRow label='5h 打满阻断'>
+                      <SettingRow
+                        label='5h 打满阻断'
+                        desc='过闸写入受限并切号，不拨调度关'
+                      >
                         <Switch
                           checked={quota.block_on_5h !== false}
                           onCheckedChange={(on) =>
@@ -278,7 +282,10 @@ export function SettingsPage() {
                           }
                         />
                       </SettingRow>
-                      <SettingRow label='7d 打满阻断'>
+                      <SettingRow
+                        label='7d 打满阻断'
+                        desc='过闸写入受限并切号，不拨调度关'
+                      >
                         <Switch
                           checked={quota.block_on_7d !== false}
                           onCheckedChange={(on) =>
@@ -333,6 +340,12 @@ export function SettingsPage() {
               ) : null}
               {tab === 'protocol' ? (
                 <>
+                  <GptPane
+                    value={
+                      (draft.codex as Record<string, unknown> | undefined) || {}
+                    }
+                    onChange={(next) => setDraft({ ...draft, codex: next })}
+                  />
                   <KernelRoutingPane
                     value={inference}
                     onChange={(next) => setDraft({ ...draft, inference: next })}
