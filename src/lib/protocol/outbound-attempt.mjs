@@ -185,7 +185,8 @@ export function prepareCliHopBody(
   }
   body = dropCliOwnedBreakpoints(body)
   body = dropLastMessageBreakpoint(body)
-  body = enforceCacheTtlOrder(body, { honorHour: ttl === '1h' })
+  // Persona markers must not override the TTL already resolved for this request.
+  body = applyCacheTtlToBody(body, ttl)
   enforceCacheLimit(body, cacheControlLimit)
   return body
 }
