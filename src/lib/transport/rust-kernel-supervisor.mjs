@@ -501,9 +501,11 @@ export function stopAllRustKernels() {
   return { ok: true, stopped: 0, cancelled }
 }
 function writeKernelJsonAtomically(configPath, config) {
+  const previousOwner = fs.existsSync(configPath) ? fs.statSync(configPath) : null
   const tempPath = `${configPath}.${process.pid}.${Date.now()}.tmp`
   try {
     fs.writeFileSync(tempPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
+    if (previousOwner) fs.chownSync(tempPath, previousOwner.uid, previousOwner.gid)
     fs.renameSync(tempPath, configPath)
   } catch (error) {
     try {
