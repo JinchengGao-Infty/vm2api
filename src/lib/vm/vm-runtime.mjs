@@ -14,10 +14,13 @@ import { runtimeKind } from './runtime-kind.mjs'
 import { buildWorkerTelemetry } from './worker-telemetry.mjs'
 import { kernelBinPath, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 import { assertCliHopAllowed, resolveOfficialCcInference } from './slot-engine.mjs'
-import { ensureSlotClaudeOwnership } from '../oauth/oauth-credentials.mjs'
+import { ensureSlotClaudeOwnership, chownSlotRuntimeFile, replaceSlotOwnedFile } from '../oauth/oauth-credentials.mjs'
 import { materializeWrapCli } from './wrap-cli-runtime.mjs'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
 import { ensureProxyEgress, isLocalEgressProxy, slotNetworkForVm } from './egress.mjs'
+import { toHostPath } from './host-path.mjs'
+import { fileURLToPath } from 'node:url'
+import { OS_CATALOG, OS_ORDER, imageForKernel, buildDirForKernel } from './os-catalog.mjs'
 
 export const RUNTIME = 'docker'
 const WORKER_BIN = process.env.KIN_WORKER_BIN || '/opt/kin-gateway/bin/kin-worker'
@@ -27,15 +30,9 @@ export const SLOT_MEMORY = process.env.KIN_VM_MEMORY || '500m'
 const MEM = SLOT_MEMORY
 const NET = process.env.KIN_VM_NETWORK || 'bridge'
 const PUBLIC_IP = process.env.PUBLIC_HOST || '166.88.96.199'
+const MODULE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 
-export const OS_CATALOG = {
-  'ubuntu-24.04': { image: 'kin-os/ubuntu:24.04', family: 'ubuntu', pretty: 'Ubuntu 24.04' },
-  'debian-12': { image: 'kin-os/debian:12', family: 'debian', pretty: 'Debian 12' },
-  archlinux: { image: 'kin-os/arch:latest', family: 'arch', pretty: 'Arch Linux' },
-  'fedora-41': { image: 'kin-os/fedora:41', family: 'fedora', pretty: 'Fedora 41' },
-}
-
-export const OS_ORDER = ['ubuntu-24.04', 'debian-12', 'archlinux', 'fedora-41']
+export { OS_REGISTRY, OS_CATALOG, OS_ORDER, imageForKernel } from './os-catalog.mjs'
 export { normalizeTimezone, normalizeTimezone as normalizeUsTimezone, US_TIMEZONES } from '../core/timezone.mjs'
 export const STANDARD_LOCALE = 'en_US.UTF-8'
 
@@ -47,8 +44,18 @@ export function timezoneForIndex(i) {
   return US_TIMEZONES[(Number(i) - 1) % US_TIMEZONES.length]
 }
 
-export function imageForKernel(kernel) {
-  return (OS_CATALOG[kernel] || OS_CATALOG['ubuntu-24.04']).image
+/** Pull the guest image, falling back to the in-repo Dockerfile when the registry is unreachable. */
+export function ensureSlotImage(kernel, { run = sh, projectRoot } = {}) {
+  const image = imageForKernel(kernel)
+  if (run(['docker', 'image', 'inspect', image], { timeout: 10_000 }).ok) return { ok: true, action: 'present', image }
+  if (run(['docker', 'pull', image], { timeout: 300_000 }).ok) return { ok: true, action: 'pulled', image }
+  const dir = path.join(projectRoot || MODULE_ROOT, 'docker', 'kin-os', buildDirForKernel(kernel))
+  if (!fs.existsSync(path.join(dir, 'Dockerfile'))) {
+    return { ok: false, error: `guest image ${image} not available and no build context at ${dir}` }
+  }
+  const built = run(['docker', 'build', '-t', image, dir], { timeout: 900_000 })
+  if (!built.ok) return { ok: false, error: built.stderr || `docker build ${image} failed` }
+  return { ok: true, action: 'built', image }
 }
 
 export function parseVmIndex(value) {
@@ -273,7 +280,7 @@ export function syncWorkerTelemetry(vm, projectRoot) {
   }
   if (!doc || typeof doc !== 'object') return { wrote: false }
   doc.telemetry = buildWorkerTelemetry(vm, projectRoot)
-  fs.writeFileSync(paths.config, JSON.stringify(doc, null, 2) + '\n', { mode: 0o600 })
+  replaceSlotOwnedFile(paths.config, JSON.stringify(doc, null, 2) + '\n', vm)
   return { wrote: true, enabled: doc.telemetry.enabled === true }
 }
 
@@ -286,7 +293,8 @@ export function reloadSlotWorker(vm, projectRoot, { routing } = {}) {
   const paths = workerPaths(projectRoot, vm.id)
   let worker
   try {
-    if (vm.proxy_required !== false && !workerProxyUrl(vm)) throw new Error('slot SOCKS5 proxy is required')
+    if (!isLocalEgressProxy(vm.proxy) && vm.proxy_required !== false && !workerProxyUrl(vm))
+      throw new Error('slot SOCKS5 proxy is required')
     worker = writeWorkerFiles(vm, projectRoot, { routing })
   } catch (error) {
     if (!fs.existsSync(paths.config) || !fs.existsSync(paths.token)) {
@@ -321,7 +329,7 @@ function writeWorkerFiles(vm, projectRoot, { transparent, routing } = {}) {
     token = fs.readFileSync(paths.token, 'utf8').trim()
   } catch {}
   if (!token) token = crypto.randomBytes(32).toString('hex')
-  fs.writeFileSync(paths.token, token + '\n', { mode: 0o600 })
+  replaceSlotOwnedFile(paths.token, token + '\n', vm)
   const onEgress =
     transparent === true ||
     (transparent !== false && String(inspectContainer(containerName(vm.id))?.networkMode || '').startsWith('kin-eg-'))
@@ -355,7 +363,7 @@ function writeWorkerFiles(vm, projectRoot, { transparent, routing } = {}) {
     if (anthropicBaseUrl) workerConfig.anthropic_base_url = anthropicBaseUrl
     if (oauthTokenUrl) workerConfig.oauth_token_url = oauthTokenUrl
   }
-  fs.writeFileSync(paths.config, JSON.stringify(workerConfig, null, 2) + '\n', { mode: 0o600 })
+  replaceSlotOwnedFile(paths.config, JSON.stringify(workerConfig, null, 2) + '\n', vm)
   const resolvedRouting = routing != null ? routing : readProjectRouting(projectRoot)
   const allowed = assertCliHopAllowed(vm, resolvedRouting)
   if (!allowed.ok) throw new Error(allowed.error)
@@ -367,12 +375,10 @@ function writeWorkerFiles(vm, projectRoot, { transparent, routing } = {}) {
     timezone: vm.timezone || '',
     routing: resolvedRouting,
   })
-  try {
-    fs.chownSync(paths.runDir, uid, gid)
-    fs.chownSync(paths.token, uid, gid)
-    fs.chownSync(paths.config, uid, gid)
-    if (kernel?.configPath) fs.chownSync(kernel.configPath, uid, gid)
-  } catch {}
+  chownSlotRuntimeFile(paths.runDir, vm)
+  chownSlotRuntimeFile(paths.token, vm)
+  chownSlotRuntimeFile(paths.config, vm)
+  if (kernel?.configPath) chownSlotRuntimeFile(kernel.configPath, vm)
   ensureSlotClaudeOwnership(path.join(projectRoot, 'vms', vm.id, 'cli-home'), uid, gid)
   return { ...paths, kernelSocket: kernel?.socketPath || paths.kernelSocket }
 }
@@ -452,6 +458,9 @@ export function startVmRuntime(vm, projectRoot, { recreate = false, routing } = 
     return { ok: true, action: 'started', runtime: vm.runtime }
   }
 
+  const img = ensureSlotImage(kernel, { projectRoot })
+  if (!img.ok) return img
+
   try {
     fs.rmSync(worker.socket, { force: true })
   } catch {}
@@ -459,8 +468,15 @@ export function startVmRuntime(vm, projectRoot, { recreate = false, routing } = 
     fs.rmSync(worker.kernelSocket, { force: true })
   } catch {}
   const machineIdFile = ensureGuestMachineIdFile(projectRoot, vm)
+  // Slots are created by the host engine: every -v source must be a host path.
+  const hostOf = (p) => toHostPath(p, { projectRoot })
   const machineMounts = machineIdFile
-    ? ['-v', `${machineIdFile}:/etc/machine-id:ro`, '-v', `${machineIdFile}:/var/lib/dbus/machine-id:ro`]
+    ? [
+        '-v',
+        `${hostOf(machineIdFile)}:/etc/machine-id:ro`,
+        '-v',
+        `${hostOf(machineIdFile)}:/var/lib/dbus/machine-id:ro`,
+      ]
     : []
   const netName = slotNetworkForVm(vm)
   if (!netName || netName === 'host' || netName === 'bridge') {
@@ -502,11 +518,11 @@ export function startVmRuntime(vm, projectRoot, { recreate = false, routing } = 
     '--label',
     `kin.vm.os=${kernel}`,
     '-v',
-    `${home}:/home/kincli`,
+    `${hostOf(home)}:/home/kincli`,
     '-v',
-    `${worker.runDir}:/run/kin`,
-    ...(fs.existsSync(WORKER_BIN) ? ['-v', `${WORKER_BIN}:/usr/local/bin/kin-worker:ro`] : []),
-    ...(mountKernel ? ['-v', `${kernelBin}:/usr/local/bin/kin-kernel:ro`] : []),
+    `${hostOf(worker.runDir)}:/run/kin`,
+    ...(fs.existsSync(WORKER_BIN) ? ['-v', `${hostOf(WORKER_BIN)}:/usr/local/bin/kin-worker:ro`] : []),
+    ...(mountKernel ? ['-v', `${hostOf(kernelBin)}:/usr/local/bin/kin-kernel:ro`] : []),
     ...machineMounts,
     '-e',
     'HOME=/home/kincli',

@@ -115,9 +115,30 @@ test('remember then lookup hits the same prompt', () => {
   }
 })
 
-test('guard error is permission_error refusal_guard not distill_blocked', () => {
+test('timed refusal expires and no longer blocks', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-refusal-'))
+  const db = createDatabase({ dataDir: dir })
+  try {
+    const repo = new RefusalGuardsRepo(db)
+    const req = body('pause this 500')
+    const fp = refusalFingerprint(req)
+    repo.remember({
+      fingerprint: fp,
+      model: req.model,
+      requestId: 'req-500',
+      errorMessage: 'upstream 503',
+      preview: 'pause this 500',
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    })
+    assert.equal(repo.get(fp), null)
+    assert.equal(repo.list().length, 0)
+  } finally {
+    db.close()
+  }
+})
+test('guard error is HTTP 500 refusal_guard not distill_blocked', () => {
   const err = refusalGuardError('abc')
-  assert.equal(err.status, 403)
+  assert.equal(err.status, 500)
   assert.equal(err.body.error.code, 'refusal_guard')
   assert.equal(err.body.error.type, 'permission_error')
   assert.equal(err.body.error.message, REFUSAL_GUARD_MESSAGE)

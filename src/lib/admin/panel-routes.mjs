@@ -150,7 +150,14 @@ import {
 } from '../vm/slot-runtime.mjs'
 import { recreateVmFiles, seedFreshCliHome } from '../vm/vm-recreate.mjs'
 import { writeSlotSeedFiles } from '../vm/slot-seed.mjs'
-import { egressEnabled, ensureProxyEgress, stopProxyEgress, boundProxyUrl } from '../vm/egress.mjs'
+import {
+  egressEnabled,
+  ensureProxyEgress,
+  stopProxyEgress,
+  boundProxyUrl,
+  hasBoundExit,
+  isLocalEgressProxy,
+} from '../vm/egress.mjs'
 import { collectSlotIdentity } from '../vm/guest-identity.mjs'
 import { applyOfficialFingerprintToVm, reconcileOfficialFingerprints } from '../identity/official-fingerprint.mjs'
 import {
@@ -383,6 +390,9 @@ export function createPanelHandler(ctx) {
     try {
       const saved = persistSlotEnginePolicy(cfg.paths.project, id, patch)
       if (!saved) return { ok: false, id, code: 'vm_not_found', error: 'vm not found' }
+      if (Object.prototype.hasOwnProperty.call(patch, 'persona_preset') && !isCodexVm(saved)) {
+        writeKernelConfig(cfg.paths.project, saved, { routing: ctx.routingConfig })
+      }
       return {
         ok: true,
         id,
@@ -403,6 +413,15 @@ export function createPanelHandler(ctx) {
         rollback,
       }
     }
+  }
+
+  function projectSlotKernelConfig(vm) {
+    if (!vm?.id || isCodexVm(vm)) return null
+    const full = getVm(cfg.paths.project, vm.id) || vm
+    return writeKernelConfig(cfg.paths.project, full, {
+      routing: ctx.routingConfig,
+      timezone: full.timezone,
+    })
   }
 
   function restoreRoutingRuntime(previous) {
@@ -1426,7 +1445,13 @@ export function createPanelHandler(ctx) {
           }
           const vm = persistVmTimezone(cfg.paths.project, id, zone, { source: 'manual' })
           if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-          timezoneSync = { applied: true, timezone: zone, source: 'manual' }
+          const kernel = projectSlotKernelConfig(vm)
+          timezoneSync = {
+            applied: true,
+            timezone: zone,
+            source: 'manual',
+            kernel_hot: kernel?.changed === true,
+          }
         } else if (followProxyTz) {
           const synced = await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, id, { force: true })
           if (!synced.ok) {
@@ -1440,6 +1465,10 @@ export function createPanelHandler(ctx) {
             })
           }
           timezoneSync = { applied: synced.applied, timezone: synced.timezone, source: 'proxy_geo' }
+          if (synced.applied) {
+            const kernel = projectSlotKernelConfig({ id })
+            timezoneSync.kernel_hot = kernel?.changed === true
+          }
         }
         if (next != null) {
           const vm = applyVmConcurrency(id, next, { override: true })
@@ -1877,7 +1906,7 @@ export function createPanelHandler(ctx) {
           try {
             invalidateLiveCredentialCache()
           } catch {}
-          if (!vm.proxy?.url) {
+          if (!hasBoundExit(vm.proxy)) {
             try {
               const allocated = proxyPool.allocateForVm(id)
               if (allocated) {
@@ -1887,7 +1916,7 @@ export function createPanelHandler(ctx) {
               }
             } catch {}
           }
-          if (!vm.proxy?.url) {
+          if (!hasBoundExit(vm.proxy)) {
             vm.status = 'stopped'
             vm.schedulable = false
             vm.schedule_disabled_reason = 'slot SOCKS5 proxy is required'
@@ -2218,7 +2247,9 @@ export function createPanelHandler(ctx) {
         } catch (e) {}
         let allocated = null
         const wantProxy = body.auto_allocate_proxy === true || startNow
-        if (wantProxy && !vm.proxy?.url) {
+        // px-local 没有 SOCKS URL，但它是合法出口；不要把它当成"未绑定"。
+        const hasExit = (v) => !!(v?.proxy?.url || isLocalEgressProxy(v?.proxy))
+        if (wantProxy && !hasExit(vm)) {
           try {
             allocated = proxyPool.allocateForVm(id, {
               ownerUserId: vm.owner_user_id || null,
@@ -2236,7 +2267,7 @@ export function createPanelHandler(ctx) {
           } catch (e) {}
         }
         let startError = null
-        if (startNow && vm.proxy?.url) {
+        if (startNow && hasExit(vm)) {
           const boot = await startSlotReady(vm, cfg.paths.project, { routing: ctx.routingConfig })
           if (!boot.ok) {
             // Slot JSON is already on disk. 500 here makes the console treat
@@ -3096,6 +3127,7 @@ export function createPanelHandler(ctx) {
             applied_concurrency: applied.concurrency,
             applied_rpm: applied.rpm,
             applied_session_slots: applied.session_slots,
+            kernel_persona: applied.kernel_persona || null,
             inference_runtime: publicEngineRuntime,
           }),
         )

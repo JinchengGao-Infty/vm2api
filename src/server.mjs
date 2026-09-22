@@ -62,7 +62,7 @@ import {
 import { makeError, ErrorType, ErrorCode } from './lib/core/errors.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
 import { ProxyPool } from './lib/vm/proxy-pool.mjs'
-import { egressListening, ensureProxyEgress } from './lib/vm/egress.mjs'
+import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
 import { isTelemetryPath, telemetryInterceptResponse } from './lib/identity/telemetry-rewrite.mjs'
 import { openDatabase, closeDatabase } from './lib/db/database.mjs'
@@ -320,10 +320,23 @@ proxyPool = new ProxyPool({
     if (!why.includes(`proxy=${proxyId}`) && !/egress_down|proxy_probe_failed/.test(why)) return
     setVmSchedulable(cfg.paths.project, vmId, true)
   },
-  egressCheck: (proxy) => egressListening(cfg.paths.project, proxy?.id),
+  egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
   repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
 })
 proxyPool.startScheduler()
+
+// 首次安装的出口池是空的，槽没有可绑出口就起不来。本机出口永远成立，先补上。
+try {
+  if (!proxyPool.snapshot().proxies?.length) {
+    const seeded = proxyPool.ensureLocal()
+    if (seeded.created) {
+      ensureProxyEgress(cfg.paths.project, proxyPool.getProxyByIdWithAuth(seeded.proxy.id))
+      console.log('[bootstrap] seeded local egress px-local')
+    }
+  }
+} catch (e) {
+  console.warn('[bootstrap] local egress seed failed', e?.message || e)
+}
 
 initPoolRuntime()
 try {

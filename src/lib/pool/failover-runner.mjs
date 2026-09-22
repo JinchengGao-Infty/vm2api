@@ -216,8 +216,24 @@ function canRetrySameAccount(policy, used, config, hopMs) {
   return hopMs < maxHopMs
 }
 
+function dropIncompleteSession(scheduler, selected, bindKeys, result, policy) {
+  if (
+    policy?.reason !== 'incomplete_assistant' &&
+    result?.terminalState !== 'incomplete' &&
+    !isIncompleteAssistantMessage(result)
+  ) {
+    return
+  }
+  const sessions = scheduler?.accountQuota?.sessions
+  for (const key of bindKeys) {
+    try {
+      sessions?.drop?.(selected?.accountId, key)
+    } catch {}
+  }
+}
+
 function applyCooldown(scheduler, selected, policy, model, stickyRouter = null, { diagnosticPin = false } = {}) {
-  if (policy?.action !== 'continue-and-cooldown' && policy?.action !== 'disable') return
+  if (policy?.action !== 'continue-and-cooldown' && policy?.action !== 'disable' && policy?.action !== 'pause') return
   // VM / master pin is a diagnostic. A 401 from the wrong inbound class
   // must not forever-park a Setup Token that has no refresh by design.
   if (diagnosticPin && (policy.reason === 'oauth_no_refresh' || policy.reason === 'oauth_revoked')) {
@@ -235,9 +251,10 @@ function applyCooldown(scheduler, selected, policy, model, stickyRouter = null, 
         ? 'disabled'
         : 'cooldown',
   })
-  // Account-level cooldown must drop every conversation pin, otherwise the
-  // next request waits on the cooling slot and never rotates.
-  if (policy.scope === 'account') {
+  // A 5xx pause keeps the conversation pin. Dropping it is how one session
+  // lands on the next VM. RPM cooldown waits on the same slot. Auth and
+  // quota cooldowns still rotate.
+  if (policy.scope === 'account' && policy.action !== 'pause' && policy.reason !== 'rate_limited') {
     stickyRouter?.unbindByAccount?.({
       accountId: selected?.accountId,
       vmId: selected?.vmId,
@@ -322,10 +339,22 @@ export class FailoverRunner {
     const excluded = new Set()
     const sameAccountRetries = new Map()
     const bindKeys = uniqueStickyKeys(stickyKey, stickyKeys)
+    let outboundSessionId = ''
+    let outboundSessionAccountId = ''
     const bindAll = (account, opts) => {
       if (!this.stickyRouter?.bind || !account) return
+      const sessions = this.scheduler?.accountQuota?.sessions
+      const sessionId = account.sessionId || (account.accountId === outboundSessionAccountId ? outboundSessionId : '')
+      const payload = { accountId: account.accountId, vmId: account.vmId }
+      if (sessionId) payload.sessionId = sessionId
       for (const key of bindKeys) {
-        this.stickyRouter.bind(key, account, opts)
+        const prev = this.stickyRouter.resolve?.(key)
+        if (prev?.accountId && prev.accountId !== account.accountId) {
+          try {
+            sessions?.drop?.(prev.accountId, key)
+          } catch {}
+        }
+        this.stickyRouter.bind(key, payload, opts)
       }
     }
     let lastResult = null
@@ -432,6 +461,14 @@ export class FailoverRunner {
           Object.prototype.hasOwnProperty.call(prepared, 'meta')
         const body = wrappedAttempt ? prepared.body : prepared
         const attemptMeta = wrappedAttempt ? prepared.meta : null
+        if (attemptMeta?.sessionId) {
+          outboundSessionId = String(attemptMeta.sessionId)
+          outboundSessionAccountId = selected.accountId
+          bindAll(
+            { accountId: selected.accountId, vmId: selected.vmId, sessionId: outboundSessionId },
+            { countHit: false },
+          )
+        }
         result = await callAttempt({
           candidate: selected,
           body,
@@ -456,6 +493,8 @@ export class FailoverRunner {
           },
           this.scheduler?.accountQuota,
         )
+        dropIncompleteSession(this.scheduler, selected, bindKeys, result, policy)
+
         lastResult = result
         lastPolicy = policy
         notifyProxyFailure(this.onProxyFailure, selected, policy)
@@ -604,6 +643,7 @@ export class FailoverRunner {
           },
           this.scheduler?.accountQuota,
         )
+        dropIncompleteSession(this.scheduler, selected, bindKeys, result, policy)
         lastResult = result
         lastPolicy = policy
         notifyProxyFailure(this.onProxyFailure, selected, policy)

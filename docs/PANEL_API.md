@@ -129,23 +129,25 @@
 
 `PUT` 热更新。`tiers` 必须回传：`PUT` 是整体替换而非 patch，缺字段即置空。保存时按 Pro/Max 把未手动 override 的槽并发写回去。
 
+`compatibility.persona_preset`（`official` / `official_full` / `zero` / `custom`）和 `compatibility.cache_ttl`（`5m` / `1h`）保存后投影到每个 Claude 槽的 `vms/<id>/run/kernel.json`：`persona_preset`、`system_layout`（`zero`→`zero`，其余→`identity`）、`default_cache_ttl`。响应 `kernel_persona.updated` 是本次字节有变化的槽数。`PATCH /vms/:id` 的 `timezone` / `timezone_follow_proxy` 另把 `timezone` 热写进该槽 `kernel.json`，`timezone_sync.kernel_hot` 表示文件有变化。容器 `TZ` 不在这次写入里。Codex 槽不写。
+
 ## 蒸馏拦截
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/PUT | `/distill` | 协议入口蒸馏拦截。命中后 HTTP 403，`code=distill_blocked`，默认文案 `不允许蒸馏`，不 hop 凭证 |
+| GET/PUT | `/distill` | 协议入口蒸馏拦截。命中后返回 `error` 里配置的状态和 code（默认 HTTP 403，`code=distill_blocked`，文案 `不允许蒸馏`），不 hop 凭证 |
 
-`PUT` 热更新 `src/config/distill-rules.json`。字段：`enabled`、`skip_official`（官方 Claude Code 放行其它针）、`skip_zero`（`persona_preset/inject=zero` 放行其它针）、`error.{status,type,code,message}`、`needles[]`、`fingerprints[]`、`structure.{min_max_tokens,require_no_tools,require_single_turn}`。`Memory-stage-one extractor` / `MUST distill` / `MUST extract durable memory` 等收割包装是硬拦截，官方/0 注入/面板删针也 403，不 hop。**不含**单独的 `Persistable response items`（普通 agent 信封）。仅 admin。
+`PUT` 热更新 `src/config/distill-rules.json`。字段：`enabled`、`skip_official`（官方 Claude Code 放行其它针）、`skip_zero`（`persona_preset/inject=zero` 放行其它针）、`error.{status,type,code,message}`、`needles[]`、`patterns[]`、`fingerprints[]`、`structure.{min_max_tokens,require_no_tools,require_single_turn}`。`patterns` 是正则，和 `Memory-stage-one extractor` / `MUST distill` / `MUST extract durable memory` 一样是硬拦截：官方、0 注入、面板删掉也会补回，命中即 403，不 hop。覆盖蒸馏（knowledge/model distillation，不含化学 distill）和提取思维链（extract/dump chain-of-thought、提取/蒸馏思维链）。**不含**单独的 `Persistable response items`（普通 agent 信封）。仅 admin。
 
 ## 拒答缓存
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/PUT | `/refusal-guards` | 仅缓存 `stop_reason=refusal` / refusal 块 / `finalState=content_filter`。命中后 HTTP 403，`code=refusal_guard`，不 hop。wrap `Usage Policy` 文案和信封 JSON 不会入缓存 |
+| GET/PUT | `/refusal-guards` | 仅缓存 `stop_reason=refusal` / refusal 块 / `finalState=content_filter`。命中后 HTTP 500，`code=refusal_guard`，不 hop。wrap `Usage Policy` 文案和信封 JSON 不会入缓存 |
 | DELETE | `/refusal-guards/:fingerprint` | 删除一条 64 位 hex 指纹 |
 | DELETE | `/refusal-guards` | 须 `{ "confirm": true }` 清空 |
 
-`PUT { enabled }` 写入 SQLite `settings.refusal_guard_enabled`。环境变量 `REFUSAL_GUARD=0` 仍强制关闭。与蒸馏拦截独立：0 注入跳过蒸馏，本缓存仍生效。仅 admin。
+`PUT { enabled }` 写入 SQLite `settings.refusal_guard_enabled`。环境变量 `REFUSAL_GUARD=0` 仍强制关闭。与蒸馏拦截独立：0 注入跳过普通蒸馏针，本缓存仍生效。`count_tokens` 同样在 peek / worker hop 之前拦截。仅 admin。
 
 
 ## 密钥 / 日志

@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { mock } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import fs from 'node:fs'
@@ -21,6 +21,7 @@ import { rustKernelBusy, rustKernelReachable } from '../../src/lib/transport/rus
 import {
   ensureRustKernel,
   writeKernelConfig,
+  syncClaudeKernelConfigsFromFile,
   reconcileCliHopRuntime,
   wrapSlotCount,
   wrapNewerThanKernel,
@@ -35,6 +36,8 @@ import {
 } from '../../src/lib/transport/rust-kernel-supervisor.mjs'
 import { rustKernelPaths, isNeedsRefreshResult } from '../../src/lib/transport/rust-kernel-client.mjs'
 import { OFFICIAL_CLI_VERSION } from '../../src/lib/identity/vm-identity.mjs'
+import { slotRuntimeOwner } from '../../src/lib/oauth/oauth-credentials.mjs'
+import { socksUidFor } from '../../src/lib/vm/vm-runtime.mjs'
 
 const unix = process.platform !== 'win32'
 const unixTest = unix ? test : test.skip
@@ -613,6 +616,7 @@ test('writeKernelConfig uses identity layout when persona_inject is rewrite', ()
   )
   const doc = JSON.parse(fs.readFileSync(written.configPath, 'utf8'))
   assert.equal(doc.system_layout, 'identity')
+  assert.equal(doc.persona_preset, 'official_full')
   fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -625,7 +629,104 @@ test('writeKernelConfig uses identity when official_full has no persona_inject',
   )
   const doc = JSON.parse(fs.readFileSync(written.configPath, 'utf8'))
   assert.equal(doc.system_layout, 'identity')
-  fs.rmSync(root, { recursive: true, force: true })
+  assert.equal(doc.persona_preset, 'official_full')
+  const before = fs.statSync(written.configPath).mtimeMs
+  const again = writeKernelConfig(
+    root,
+    { id: 'vm-05', inference_engine: 'rust' },
+    { token: 'tok', routing: { compatibility: { persona_preset: 'official_full' } } },
+  )
+  assert.equal(again.changed, false)
+  assert.equal(fs.statSync(written.configPath).mtimeMs, before)
+  const zero = writeKernelConfig(
+    root,
+    { id: 'vm-05', inference_engine: 'rust', persona_preset: 'zero' },
+    { token: 'tok', routing: { compatibility: { persona_preset: 'official_full' } } },
+  )
+  assert.equal(zero.changed, true)
+  const overridden = JSON.parse(fs.readFileSync(written.configPath, 'utf8'))
+  assert.equal(overridden.persona_preset, 'zero')
+  assert.equal(overridden.system_layout, 'zero')
+})
+
+test('kernel.json rename chowns the new inode to the slot uid before publish', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-owner-'))
+  const vm = { id: 'vm-01', inference_engine: 'rust' }
+  const owner = slotRuntimeOwner(vm)
+  const calls = []
+  const chown = mock.method(fs, 'chownSync', (file, uid, gid) => {
+    calls.push({ file, uid, gid })
+  })
+  const kernelOwned = () => calls.filter((call) => String(call.file).includes(`${path.sep}kernel.json`))
+  try {
+    assert.equal(owner.uid, Number(process.env.KIN_VM_UID_BASE || 10000) + 1)
+    assert.equal(owner.gid, Number(process.env.KIN_VM_GID || 987))
+    assert.equal(String(owner.uid), socksUidFor(vm))
+    const zero = { compatibility: { persona_preset: 'zero', cache_ttl: '5m' } }
+    const full = { compatibility: { persona_preset: 'official_full', cache_ttl: '5m' } }
+    const first = writeKernelConfig(root, vm, { token: 'tok', routing: zero })
+    assert.ok(
+      calls.some((call) => call.file === first.tokenPath || String(call.file).startsWith(`${first.tokenPath}.`)),
+    )
+    calls.length = 0
+    const changed = writeKernelConfig(root, vm, { token: 'tok', routing: full })
+    assert.equal(changed.changed, true)
+    const published = kernelOwned()
+    assert.ok(published.length >= 1)
+    assert.ok(
+      published.every((call) => call.uid === owner.uid && call.gid === owner.gid),
+      JSON.stringify(published),
+    )
+    assert.ok(
+      published.some(
+        (call) => call.file !== changed.configPath && String(call.file).startsWith(`${changed.configPath}.`),
+      ),
+    )
+    calls.length = 0
+    const again = writeKernelConfig(root, vm, { token: 'tok', routing: full })
+    assert.equal(again.changed, false)
+    assert.equal(fs.readFileSync(again.configPath, 'utf8').includes('"persona_preset": "official_full'), true)
+    assert.ok(
+      kernelOwned().some((call) => call.file === again.configPath && call.uid === owner.uid && call.gid === owner.gid),
+    )
+  } finally {
+    chown.mock.restore()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('routing.json mtime projects persona_preset into Claude kernel.json only', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-persona-file-'))
+  const vms = path.join(root, 'vms')
+  fs.mkdirSync(vms, { recursive: true })
+  fs.writeFileSync(path.join(vms, 'vm-claude.json'), JSON.stringify({ id: 'vm-claude', persona_preset: 'zero' }))
+  fs.writeFileSync(
+    path.join(vms, 'vm-codex.json'),
+    JSON.stringify({ id: 'vm-codex', platform: 'openai', family: 'codex' }),
+  )
+  const routingFile = path.join(root, 'routing.json')
+  fs.writeFileSync(routingFile, JSON.stringify({ compatibility: { persona_preset: 'official_full', cache_ttl: '1h' } }))
+  try {
+    const first = syncClaudeKernelConfigsFromFile(root, routingFile)
+    assert.equal(first.updated, 1)
+    const kernelPath = path.join(vms, 'vm-claude', 'run', 'kernel.json')
+    const kernel = JSON.parse(fs.readFileSync(kernelPath, 'utf8'))
+    assert.equal(kernel.persona_preset, 'zero')
+    assert.equal(kernel.system_layout, 'zero')
+    assert.equal(fs.existsSync(path.join(vms, 'vm-codex', 'run', 'kernel.json')), false)
+    const repeat = syncClaudeKernelConfigsFromFile(root, routingFile)
+    assert.equal(repeat.skipped, true)
+    fs.writeFileSync(path.join(vms, 'vm-claude.json'), JSON.stringify({ id: 'vm-claude' }))
+    fs.writeFileSync(routingFile, JSON.stringify({ compatibility: { persona_preset: 'official', cache_ttl: '1h' } }))
+    fs.utimesSync(routingFile, new Date(Date.now() + 5000), new Date(Date.now() + 5000))
+    const next = syncClaudeKernelConfigsFromFile(root, routingFile)
+    assert.equal(next.updated, 1)
+    const followed = JSON.parse(fs.readFileSync(kernelPath, 'utf8'))
+    assert.equal(followed.persona_preset, 'official')
+    assert.equal(followed.system_layout, 'identity')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('writeKernelConfig strips leftover CONNECT https_proxy', () => {

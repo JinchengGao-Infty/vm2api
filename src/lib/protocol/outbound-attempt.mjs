@@ -23,6 +23,7 @@ import { resolveCrsHeaders } from '../identity/crs-headers.mjs'
 import { hasClaudeCode1mSuffix } from './context-1m.mjs'
 import {
   refreshOfficialSystemEnvironment,
+  stampBillingPromptId,
   CRS_OFFICIAL_SYSTEM,
   CRS_OFFICIAL_CLI_SYSTEM,
   CRS_COMPACT_IDENTITY,
@@ -37,8 +38,8 @@ import {
   applyCacheTtlToBody,
   applyCacheBreakpoints,
   enforceCacheTtlOrder,
+  forceEphemeralCacheTtl,
   normalizeCacheBreakpoints,
-  normalizeCacheTtl,
   stripIllegalCacheControlFields,
 } from './cache-ttl.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from './claude-code-betas.mjs'
@@ -82,8 +83,8 @@ export const CLI_HOP_CACHE_BREAKPOINTS = Object.freeze({
   messages: 'rewrite',
 })
 
-/** Direct utility callers use the legacy 5m policy; production passes either
- * the resolved TTL or null for official Claude Code traffic. */
+/** Wrap CLI tools/system omit ttl, which Anthropic treats as 5m and processes first.
+ * A later message 1h is the messages.N 400, so the hop wire value is 5m. */
 export const CLI_HOP_CACHE_TTL = '5m'
 
 function dropNodeCacheControl(node) {
@@ -164,8 +165,8 @@ export function prepareCliHopBody(
   }
   body = stripInvalidThinkingBlocks(body)
   body = alignSamplingWithThinking(body)
-  if (cacheTtl == null) return body
-  const ttl = normalizeCacheTtl(cacheTtl)
+  const ttl = CLI_HOP_CACHE_TTL
+  if (cacheTtl == null) return forceEphemeralCacheTtl(body, ttl)
   body = stripIllegalCacheControlFields(body)
   // Node owns the stable previous-user boundary; the kernel receives the same
   // resolved TTL and owns the current tail plus wrap-owned markers.
@@ -185,8 +186,7 @@ export function prepareCliHopBody(
   }
   body = dropCliOwnedBreakpoints(body)
   body = dropLastMessageBreakpoint(body)
-  // Persona markers must not override the TTL already resolved for this request.
-  body = applyCacheTtlToBody(body, ttl)
+  body = forceEphemeralCacheTtl(enforceCacheTtlOrder(body), ttl)
   enforceCacheLimit(body, cacheControlLimit)
   return body
 }
@@ -210,27 +210,50 @@ export function prepareOutboundAttempt({
   reqHeaders = {},
   officialClient,
   sessionId: sessionIdOverride,
+  accountId = '',
+  boundSessionId = '',
+  boundAccountId = '',
+  clientDiscriminator = undefined,
+  clientIp = '',
+  userAgent = '',
+  apiKeyId = '',
+  firstUserText = '',
   authScheme,
   credentialMode,
 } = {}) {
   const inferenceOnly = isSetupTokenMode(credentialMode) || isApiKeyMode(credentialMode)
   const keepCallerSession = officialClient === true || (officialClient == null && !unofficial)
+  const sessionContext = {
+    officialClient: keepCallerSession,
+    accountId,
+    boundSessionId,
+    boundAccountId,
+    clientDiscriminator,
+    clientIp,
+    userAgent: userAgent || reqHeaders?.['user-agent'] || '',
+    apiKeyId,
+    firstUserText,
+  }
   const sessionId =
     String(sessionIdOverride || '').trim() ||
-    resolveOutboundSessionId(extractCallerSession({ inbound, body: canonicalBody, headers: reqHeaders }), {
-      officialClient: keepCallerSession,
-    })
+    resolveOutboundSessionId(
+      extractCallerSession({ inbound, body: canonicalBody, headers: reqHeaders }),
+      sessionContext,
+    )
   let identified = applyCrsIdentityReplace(
     officialMessagesBody(canonicalBody, { stream }),
     identity,
     inbound,
     reqHeaders,
-    { officialClient: keepCallerSession, sessionId },
+    { officialClient: keepCallerSession, sessionId, ...sessionContext },
   )
   const callerSessionId = sessionIdFromOutboundBody(identified)
   if (identity && callerSessionId) identity.callerSessionId = callerSessionId
   if (identity) {
     identified = refreshOfficialSystemEnvironment(identified, identity, identified.model)
+  }
+  if (!keepCallerSession && String(sessionIdOverride || '').trim()) {
+    identified = stampBillingPromptId(identified, sessionId, firstUserText)
   }
   // Official Claude Code places its own breakpoints; adding ours would shift the
   // prefix it already caches.
@@ -274,6 +297,14 @@ export function prepareOutboundEnvelope({
   homeDir = '',
   officialClient,
   sessionId,
+  accountId = '',
+  boundSessionId = '',
+  boundAccountId = '',
+  clientDiscriminator,
+  clientIp = '',
+  userAgent = '',
+  apiKeyId = '',
+  firstUserText = '',
   authScheme,
   credentialMode,
   want1m,
@@ -291,6 +322,14 @@ export function prepareOutboundEnvelope({
     reqHeaders,
     officialClient,
     sessionId,
+    accountId,
+    boundSessionId,
+    boundAccountId,
+    clientDiscriminator,
+    clientIp,
+    userAgent,
+    apiKeyId,
+    firstUserText,
     authScheme,
     credentialMode,
   })
