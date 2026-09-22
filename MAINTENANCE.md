@@ -92,3 +92,20 @@ GitHub Releases API 确认最新正式版 v1.3.21，发布时间 2026-09-22T04:0
 切换前确认 OMP 主会话空闲、服务在途请求为 0。备份 `/opt/vm2api/backups/upgrade-1.3.21-20260922T042345Z/`，包含完整运行文件、在线 DB 与切换前 DB、原部署差异及镜像信息；旧 `vm2api:1.3.9-infty` 镜像保留。账号凭证、Key、本地出口 px-local、default/pro/max 100% 额度阈值、distill disabled、5m 缓存及 OMP 原会话保留。
 
 使用上游真实 PUT routing 接口保存 5m 后返回 HTTP 200；kernel.json、worker.json、internal.token 均保持 10001:987、0600。用当前 OMP 的实际 URL、Key、User-Agent 发三轮工具调用，全部 HTTP 200、tool_use，参数 1/2/3 正确；缓存读取 0 → 6,519 → 12,468 tokens，写入均记录为 5m。结果 `/Users/gaojincheng/.omp/reports/vm2api-upgrade-1.3.21-default-verification.json`。无须重启 OMP 或新建对话。
+
+## 升级到上游原版 1.3.27（2026-09-23）
+
+用户要求先更新上游，等待上游适配 Opus 5.5。本次通过 GitHub Releases API 确认最新正式版为 v1.3.27，将 tag 无冲突合入维护分支，合并提交 `f800e48`，已推送 fork。应用代码与该 tag 一致，额外文件仍只有 AGENTS.md 和本记录；没有增加模型或修改 OMP。
+
+生产使用固定版本官方镜像 `ghcr.io/dofastted/vm2api:v1.3.27`，运行中容器 VERSION 已核实。源码快照 `/opt/vm2api-release-1.3.27`。宿主源码、share/wrap-cli 和内核更新后，通过上游 `wrap-cli/sync` 明确同步并重启 vm-01；新执行进程已启动，ready_slots=20。vm-02 继续停止。
+
+切换前确认服务在途请求为 0。回退备份 `/opt/vm2api/backups/upgrade-1.3.27-20260922T171149Z/` 包含运行文件归档、在线 DB、切换前 DB、原部署差异和镜像信息；旧 1.3.21 镜像保留。部署后核对 .env、routing.json、distill-rules.json 与备份内容一致，保留账号、Key、本地出口、100% 额度阈值和 5m 缓存。kernel.json、worker.json、internal.token 仍为 10001:987、0600。
+
+### 实际请求与缓存
+
+- 使用当前 OMP provider 的 URL、Key、User-Agent，Opus 5 和 Opus 4.6 普通请求均返回 HTTP 200、end_turn。Opus 5 请求读取 README.md 时正常返回 `read_file` 工具调用，参数为 README.md。
+- Opus 4.6 三轮工具调用全部返回 HTTP 200、tool_use，参数 1/2/3 正确。新版保留客户端消息缓存标记；不带消息标记时，本组合成请求只复用了工具/系统前缀，缓存读取为 0 → 6,519 → 6,519。不能把旧验证脚本未打消息标记当作缓存增长验证。
+- 已核对 OMP `packages/ai/src/providers/anthropic.ts` 的 `applyHeadCaching` 和 `applyPromptCaching`，客户端会标记稳定头部和近期消息。增加近期消息标记后，三轮缓存读取为 6,519 → 12,465 → 14,845 tokens，后两轮各新增 2,380 tokens 的 5m 缓存，未缓存输入各为 6 tokens。第三轮首次在本机 TLS 握手时 EOF，随后仅重发该轮成功，没有重跑前两轮。未变更默认 TTL，也未验证 1h。
+- 同一组合成 `deployment_ack` 长填充请求在 Opus 5 上触发了上游 Usage Policy 拒绝，强制工具和 auto 两种方式均出现；普通对话和自然的读文件工具请求成功。该现象单独记录，未判断为强制工具专属问题、封号或整个工具通道不可用，也未修改上游拒绝处理。
+
+本机报告位于 `/Users/gaojincheng/.omp/reports/`：`vm2api-upgrade-1.3.27-default-verification.json`、`vm2api-upgrade-1.3.27-client-cache-verification.json`、`vm2api-upgrade-1.3.27-basic-requests.json`、`vm2api-upgrade-1.3.27-opus5-read-file.json`；失败的合成请求另存 forced/auto-tool-probe 报告。报告不含凭证。OMP 无须重启或新开对话，当前主模型继续使用原配置。
