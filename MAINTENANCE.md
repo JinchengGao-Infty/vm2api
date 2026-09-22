@@ -23,7 +23,7 @@
 
 这项修复此前已在现有部署回放三条连续真实 OMP 请求：缓存读取为 0、40,645、42,333 tokens，新增历史能进入缓存。原始请求和响应留在仓库之外。
 
-2026-09-22 用户明确要求上游实现可用时以上游为准。v1.3.9 已实现安装、同步和模板制作时优先主内核，自用补丁已移除；晋升模板沿用上游复制所选槽位快照的语义。以 v1.3.9 为基础，当前仅保留下文两处现场复现所需的小修复，其他应用代码和发布文件采用上游。
+2026-09-22 用户明确要求上游实现可用时以上游为准。v1.3.9 已实现安装、同步和模板制作时优先主内核，自用补丁已移除；晋升模板沿用上游复制所选槽位快照的语义。1.3.9 阶段另外保留了下文两处现场复现所需的小修复；上游 v1.3.21 已解决，现已一并采用上游实现。
 
 ## 独立问题：缓存 TTL
 
@@ -76,9 +76,19 @@ isif 上的 vm-01 绑定 `px-local`，聊天和凭证刷新都应使用 VPS 本�
 
 已将最新正式版 v1.3.9 合入维护分支并部署到 isif。用户要求优先采用可用的上游实现，因此移除了此前的内核来源自用补丁。当前镜像 `vm2api:1.3.9-infty`，代码提交 `3214c56`，构建目录 `/opt/vm2api-build-1.3.9`；备份 `/opt/vm2api/backups/upgrade-1.3.9-20260921T171919Z/`，旧 1.3.6 镜像保留。同步 vm-01 新内核，并通过上游路由接口补写旧 kernel.json 缺失的 `default_cache_ttl` 等新版配置。账号、Key、本地出口、额度阈值、禁用 distill 设置和 OMP 会话保留。
 
-### 当前仅保留的两处源码修复
+### 1.3.9 阶段的两处修复（1.3.21 已由上游取代）
 
 1. `writeKernelJsonAtomically()` 保留原配置文件 UID/GID。上游原子替换生成 root:root 0600 文件，而 kin-01 使用 10001:987，保存缓存设置并重启后实际报 `read worker config: Permission denied`，进入重启循环。修复后再次调用真实 PUT routing 接口返回 200，文件仍为 10001:987 0600，槽内运行用户可读取。提交 `4ce6fc7`。
 2. `prepareCliHopBody()` 最后用已有 `applyCacheTtlToBody()` 将标记统一为已解析的请求 TTL。上游模板中的 1h 标记会被误当成用户选择，覆盖已解析的 5m；现场输出 `resolved=5m` 但消息标记仍为 1h。新版完整错误明确返回 Anthropic 400：1h 标记不能出现在 5m 标记之后。官方客户端仍走原有提前返回分支，其自有标记不改。提交 `3214c56`。
 
 最终使用实际 OMP provider URL、Key、User-Agent 发三轮连续工具调用，全部 HTTP 200、tool_use，参数分别为 1、2、3。缓存读取 6,519 → 6,519 → 12,465 tokens；第二、三轮分别新增 5,946 / 2,380 tokens 的 5m 缓存。结果 `/Users/gaojincheng/.omp/reports/vm2api-upgrade-1.3.9-default-verification.json`。保持默认 5m：1h 请求在本次升级验证中仍触发混合 TTL 400，不根据发布说明直接启用。OMP 无须重启。
+
+## 升级到上游原版 1.3.21（2026-09-22 中午）
+
+GitHub Releases API 确认最新正式版 v1.3.21，发布时间 2026-09-22T04:00:22Z。上游已修复槽配置原子替换的 UID/GID 问题，并将 cli-hop 线上缓存标记统一为 5m；两处自用源码补丁均已移除。维护分支合并提交 `2d5960e`，应用代码与 v1.3.21 一致，只额外保留 AGENTS.md 和本维护记录。
+
+生产改为直接运行固定版本官方镜像 `ghcr.io/dofastted/vm2api:v1.3.21`，不再为相同应用源码自行构建。服务器源码快照 `/opt/vm2api-release-1.3.21`，部署目录仍为 `/opt/vm2api`。实际控制面 VERSION 已确认 1.3.21；新 `share/wrap-cli/cli-node` 和 kernel 同步到 vm-01，并明确重启 dataplane，未删除槽容器。槽启动健康返回 ready_slots=20，凭证 fresh。
+
+切换前确认 OMP 主会话空闲、服务在途请求为 0。备份 `/opt/vm2api/backups/upgrade-1.3.21-20260922T042345Z/`，包含完整运行文件、在线 DB 与切换前 DB、原部署差异及镜像信息；旧 `vm2api:1.3.9-infty` 镜像保留。账号凭证、Key、本地出口 px-local、default/pro/max 100% 额度阈值、distill disabled、5m 缓存及 OMP 原会话保留。
+
+使用上游真实 PUT routing 接口保存 5m 后返回 HTTP 200；kernel.json、worker.json、internal.token 均保持 10001:987、0600。用当前 OMP 的实际 URL、Key、User-Agent 发三轮工具调用，全部 HTTP 200、tool_use，参数 1/2/3 正确；缓存读取 0 → 6,519 → 12,468 tokens，写入均记录为 5m。结果 `/Users/gaojincheng/.omp/reports/vm2api-upgrade-1.3.21-default-verification.json`。无须重启 OMP 或新建对话。
