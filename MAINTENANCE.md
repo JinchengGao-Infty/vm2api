@@ -119,3 +119,17 @@ GitHub Releases API 确认最新正式版 v1.3.21，发布时间 2026-09-22T04:0
 实际公网 `/v1/models` 已列出 `claude-opus-5-5`；用 OMP 原有 VM2 URL、Key 和 User-Agent 发请求，Opus 5.5 返回 HTTP 200、`read_file` 工具调用及正确文件参数。OMP `~/.omp/agent/models.yml` 新增此模型，沿用 300k 上下文，设 adaptive thinking 的 medium 默认、官方价格元数据；其余模型配置未变。备份在 `~/.omp/backups/models-before-opus-5-5-20260923T033241Z.yml`。临时 OMP CLI 请求返回 OK，科研工作台 `/api/models` 已显示 Opus 5.5。当前主代理模型仍为 Opus 5，可在工作台选择新模型。
 
 科研工作台原 `next start` 进程重启时发现 `.next` 生产构建文件缺失，已按该项目 AGENTS.md 的开发启动方式改为 `next dev --webpack`，仍监听 127.0.0.1:30141。服务日志为 `/tmp/omp-research-web-30141-dev-20260923.log`。原会话保留在磁盘上。
+
+## 启用 1h 缓存并升级上游 1.3.32（2026-09-23 晚）
+
+用户要求查清 1h 未生效的原因，并在可用时启用。1.3.29 上仅热改 `compatibility.cache_ttl=1h`、将设置投影到两个槽的 `kernel.json`，真实 Claude Code 两轮请求仍返回 8,090 个 5m 写入 token、1h 为零。确认 vm-01 的 20 个执行位全部空闲后，使用上游 `restartRustKernel()` 重载，保持相同二进制和请求设置，返回变为 8,093 个 1h 写入 token、5m 为零，第二轮读取 7,989 tokens。因此本次直接故障是运行中进程没有采用热更新后的 TTL；实际账号可以接受 1h。
+
+排查期间上游新发布 1.3.32。1.3.30 让官方 Claude Code 请求也参与 TTL 解析，并按会话固定 TTL；1.3.31 更新会话到执行位的绑定；1.3.32 重编 CLI 并稳定缓存前缀中的账单字段。维护分支无冲突合并 tag，提交 `d28f6aa`。应用源码仍采用上游原版，没有增加自用协议补丁。
+
+生产运行固定官方镜像 `ghcr.io/dofastted/vm2api:v1.3.32`，源码快照 `/opt/vm2api-release-1.3.32`。升级前再次确认执行位全部空闲，备份 `/opt/vm2api/backups/upgrade-1.3.32-20260923T123523Z/` 包含运行文件、在线 SQLite 和旧镜像记录。更新控制面、模板后，调用上游 `syncWrapSample()` 和 `restartRustKernel()` 同步并重载 vm-01；vm-02 保持停止。实际 CLI 与主 kernel 对应新版部署文件，健康返回 20 个空闲执行位。账号、Key、出口、额度和蒸馏配置保留。
+
+VM2 默认缓存保持 `1h`，两槽 `kernel.json` 的 `default_cache_ttl` 均为 `1h`，文件权限与所属用户正确。本机 `~/.claude/settings.json` 和 CC Switch 的 VM2 provider 同步保存 `promptCacheTtl: "1h"`；保留用户的 `model: "opus"` 和状态栏，any provider 未修改。客户端备份位于 `~/.claude/backups/cache-1h-20260923-203359/`。
+
+新版本使用真实 Claude Code 2.1.280、Opus 5.5，按两次顺序 Bash 调用执行三轮模型请求，全部成功；原始客户端响应的缓存读取为 3,026 → 8,544 → 8,642 tokens，新增 1h 缓存为 5,518 / 98 / 96 tokens，5m 写入均为零。证据来自客户端原始 usage，不依赖控制面按配置重标 TTL 的日志统计。验证会话为 `a7ea1e6a-5e7a-4131-bd82-4ce8d898d32d`，本机结果目录 `~/.omp/reports/vm2api-cache-1h-20260923/`。
+
+该会话完成后空闲 360 秒，没有中间保活请求，再通过 `claude --resume` 续接原会话。请求正常完成，读取 8,738 个缓存 token，新增 632 个 1h 缓存 token、5m 写入为零，未缓存输入为 4 tokens。由此实测确认这段上下文在超过五分钟后仍可复用；结果为同目录的 `delayed-result.json` 与 `verification-state.json`。现有用户对话可以继续使用，无须新开对话或自行重载 VM2。
