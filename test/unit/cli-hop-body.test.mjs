@@ -193,18 +193,50 @@ test('cli-hop keeps multi-turn history intact for native CLI marker placement', 
   assert.ok(body.messages.every((message) => message.content.every((block) => block.cache_control == null)))
 })
 
-test('cli-hop still lifts trailing system constraints without adding markers', () => {
+test('Claude Code turns stay a byte prefix of the next one, from turn 1 on', () => {
+  const reminder = (text) => ({ role: 'system', content: text })
+  const budget = (left) => reminder(`<total_tokens>${left} tokens left</total_tokens>`)
+  // No client flag: relays strip the billing block, so this must hold for any caller.
+  const turn = (messages) =>
+    prepareCliHopBody({
+      model: 'claude-opus-5-5',
+      max_tokens: 64000,
+      system: [{ type: 'text', text: 'main prompt' }],
+      messages,
+    })
+  // Turn 1 ends with SessionStart context, later turns with a live token counter.
+  const turns = [
+    [{ role: 'user', content: 'u1' }, reminder('SessionStart hook context')],
+    [{ role: 'assistant', content: 'a1' }, { role: 'user', content: 'u2' }, budget(14930105)],
+    [{ role: 'assistant', content: 'a2' }, { role: 'user', content: 'u3' }, budget(14928642)],
+  ]
+  let history = []
+  let previous = null
+  for (const added of turns) {
+    history = [...history, ...added]
+    const body = turn(history)
+    assert.equal(body.messages.at(-1).role, 'system')
+    if (previous) {
+      assert.deepEqual(body.system, previous.system)
+      assert.deepEqual(body.messages.slice(0, previous.messages.length), previous.messages)
+    }
+    previous = body
+  }
+})
+
+test('cli-hop lifts role=system turns for models that reject them', () => {
   const body = prepareCliHopBody({
-    model: 'claude-sonnet-5',
+    model: 'claude-haiku-4-5',
     max_tokens: 256,
     messages: [
       { role: 'user', content: 'u1' },
-      { role: 'system', content: 'caller constraint' },
+      { role: 'system', content: 'reminder' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
     ],
   })
-  assert.equal(body.messages.length, 1)
-  assert.equal(body.system.at(-1).text, 'caller constraint')
-  assert.equal(body.messages[0].content[0].cache_control, undefined)
+  assert.ok(body.messages.every((message) => message.role !== 'system'))
+  assert.equal(body.system.at(-1).text, 'reminder')
 })
 test('prepareCliHopBody clamps small max_tokens to 1024 for automated probe tests', () => {
   const probe1 = prepareCliHopBody({
