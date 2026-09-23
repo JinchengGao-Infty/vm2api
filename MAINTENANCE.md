@@ -109,3 +109,13 @@ GitHub Releases API 确认最新正式版 v1.3.21，发布时间 2026-09-22T04:0
 - 同一组合成 `deployment_ack` 长填充请求在 Opus 5 上触发了上游 Usage Policy 拒绝，强制工具和 auto 两种方式均出现；普通对话和自然的读文件工具请求成功。该现象单独记录，未判断为强制工具专属问题、封号或整个工具通道不可用，也未修改上游拒绝处理。
 
 本机报告位于 `/Users/gaojincheng/.omp/reports/`：`vm2api-upgrade-1.3.27-default-verification.json`、`vm2api-upgrade-1.3.27-client-cache-verification.json`、`vm2api-upgrade-1.3.27-basic-requests.json`、`vm2api-upgrade-1.3.27-opus5-read-file.json`；失败的合成请求另存 forced/auto-tool-probe 报告。报告不含凭证。OMP 无须重启或新开对话，当前主模型继续使用原配置。
+
+## 升级到上游原版 1.3.29，接入 Opus 5.5（2026-09-23）
+
+上游 v1.3.28 加入 `claude-opus-5-5`，将出站 Claude Code 版本改为 2.1.280；v1.3.29 修复 native Claude 多轮缓存只写不读。维护分支无冲突合并 v1.3.29，提交 `f2754ff`，已推送 fork；应用代码仍采用上游原版。生产运行官方镜像 `ghcr.io/dofastted/vm2api:v1.3.29`，源码快照 `/opt/vm2api-release-1.3.29`，原工作目录 `/opt/vm2api`。
+
+切换前主工作台无运行中代理，vm-01 无在途请求。备份 `/opt/vm2api/backups/upgrade-1.3.29-20260923T032848Z/` 包含运行文件、DB、差异和原镜像信息；旧 1.3.27 镜像保留。仅同步并重启 vm-01，vm-02 继续停止。旧槽的 `kernel.json` 在第一次同步后仍保留 `cli_version=2.1.278`；用上游 `PUT /api/panel/routing` 重存已有 5m 配置，投影出 2.1.280，再同步重启 vm-01，内核健康信息确认实际运行版本 2.1.280、ready_slots=20。`.env` 和蒸馏配置与备份一致；routing 相比备份仅移除了上游已弃用的 `codex.plugin` 字段，缓存仍为 5m。
+
+实际公网 `/v1/models` 已列出 `claude-opus-5-5`；用 OMP 原有 VM2 URL、Key 和 User-Agent 发请求，Opus 5.5 返回 HTTP 200、`read_file` 工具调用及正确文件参数。OMP `~/.omp/agent/models.yml` 新增此模型，沿用 300k 上下文，设 adaptive thinking 的 medium 默认、官方价格元数据；其余模型配置未变。备份在 `~/.omp/backups/models-before-opus-5-5-20260923T033241Z.yml`。临时 OMP CLI 请求返回 OK，科研工作台 `/api/models` 已显示 Opus 5.5。当前主代理模型仍为 Opus 5，可在工作台选择新模型。
+
+科研工作台原 `next start` 进程重启时发现 `.next` 生产构建文件缺失，已按该项目 AGENTS.md 的开发启动方式改为 `next dev --webpack`，仍监听 127.0.0.1:30141。服务日志为 `/tmp/omp-research-web-30141-dev-20260923.log`。原会话保留在磁盘上。
