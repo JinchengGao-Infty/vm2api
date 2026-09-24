@@ -141,3 +141,15 @@ VM2 默认缓存保持 `1h`，两槽 `kernel.json` 的 `default_cache_ttl` 均�
 生产运行官方镜像 `ghcr.io/dofastted/vm2api:v1.3.35`，容器内 VERSION 已确认。源码与前端快照 `/opt/vm2api-release-1.3.35`。切换前核实 vm-01 的 20 个执行位全部空闲；备份 `/opt/vm2api/backups/upgrade-1.3.35-20260923T144743Z/` 包含原控制面文件、配置、槽登记、在线 SQLite 和旧镜像记录。只更新并重启控制面；二进制没有变化，没有执行槽内内核同步或重载。kin-01 的容器启动时间保持不变，CLI PID 11 与内核运行时长连续，凭证 fresh。`.env`、routing 与 distill 配置保持原内容，一小时缓存保留。
 
 真实 Claude Code 2.1.280、Opus 5.5 连续两次 Bash 调用（三轮模型请求）成功，再用 `--resume` 续接同一验证会话成功。客户端原始 usage 的缓存读取依次为 0 → 9,063 → 9,155 → 9,247 tokens，写入依次为 9,063 / 92 / 92 / 771 tokens，全部为 1h，5m 写入为零；未缓存输入为 2 / 2 / 2 / 4 tokens。后台对应四次请求均 HTTP 200，`cache_prefix` 的 turn 连续为 1–4，break 均为 null。验证会话 `76678409-ce40-45cc-91e0-00f1d924ae98`，证据目录 `~/.omp/reports/vm2api-upgrade-1.3.35/`。现有用户对话可以继续使用，无须客户端重启或新建对话。
+
+## 升级到上游 1.3.42（2026-09-24）
+
+用户确认升级后，无冲突合入 v1.3.42，合并提交 `2c69069`。本次采用上游原版，包含静默任务取消与卡死执行位处理、额度/过载错误识别、槽内 OAuth 操作及可选 crag 数据面。现有数据面继续使用 wrap，没有切换到 crag。
+
+生产运行固定官方镜像 `ghcr.io/dofastted/vm2api:v1.3.42`，源码快照 `/opt/vm2api-release-1.3.42`。备份 `/opt/vm2api/backups/upgrade-1.3.42-20260924T053942Z/` 包含配置、运行代码及二进制、在线 SQLite 和容器信息；旧镜像保留。切换控制面前、同步并重启账号槽前分别确认 vm-01 的 20 个执行位全部空闲。控制面更新后通过上游 `syncWrapSample()` 和 `writeKernelConfig()` 铺设新版，再重启原 kin-01 容器，使文件挂载的 kin-worker 及执行内核都实际更新；没有删除账号容器，vm-02 保持停止。
+
+重启后内核健康为 `ready_slots=20`、`wedged_slots=0`、凭证 fresh，CLI 版本 2.1.280。实际运行 CLI 为新版 34,645,320 字节文件，容器挂载的 kin-worker 为 16,070,541 字节。`.env`、`routing.json`、`distill-rules.json` 内容与备份一致，一小时缓存、账号出口和原额度阈值保留。官方镜像未包含可选 crag 文件，另从相同 v1.3.42 tag 的 `share/crag/kin-kernel` 补入部署目录；仅提供切换所需文件，未启用该模式。
+
+本机 Claude Code 沿用保存的 `claude-opus-5-5[1m]`，实际依次执行两次 Bash 后返回 `VM2_1342_OK`。对应三次请求全部 HTTP 200；客户端原始缓存读取 0 → 7,978 → 8,084，写入 7,978 / 106 / 106，全部为 1h，5m 为零，未缓存输入每次 2 tokens。客户端报告 `contextWindow=1000000`。验证会话 `0c12b0a4-0ae3-454c-b9be-427e8faa9100`，证据目录 `~/.omp/reports/vm2api-upgrade-1.3.42/`。没有进行百万 token 的大请求。
+
+本次额外核查发现：当前 `credentials.json` 的 scopes 只有 `user:inference`，槽内官方 `/api/oauth/usage` 返回 HTTP 403 `oauth_scope_insufficient`，要求 `user:profile`。调用使用的就是该凭证路径，属于当前授权范围限制；聊天和工具调用已实际成功，不把此结果解释为账号不可用。未更换登录凭证、强制刷新或调整权限。后续若要恢复主动额度查询，需要具有相应 profile 权限的 OAuth 登录。
