@@ -28,6 +28,9 @@ export type WrapSample = {
   error?: string
   meta?: WrapSampleMeta | null
   kernel?: WrapKernelPayload | null
+  cli_node?: WrapKernelPayload | null
+  crag?: (WrapKernelPayload & { ok?: boolean }) | null
+  dataplane?: 'wrap' | 'crag'
   written?: string[]
   sample_ok?: boolean
 }
@@ -90,8 +93,19 @@ export function repairWrapSample(id: string) {
     { method: 'POST', body: JSON.stringify({}) }
   )
 }
+
 export type WrapReleaseUpdate = {
-  release?: { tag?: string; version?: string; asset?: string; size?: number }
+  release?: {
+    tag?: string
+    version?: string
+    asset?: string
+    size?: number
+    cli_node?: string
+    cli_node_size?: number
+    crag?: string | null
+    crag_size?: number
+    crag_skipped?: boolean
+  }
   kernel?: WrapSample
   sync?: WrapSyncReport
 }
@@ -112,3 +126,27 @@ export function uploadKernelBinary(file: Blob) {
     body: file,
   })
 }
+
+export function uploadCragKernelBinary(file: Blob) {
+  return api<WrapSample>('/api/panel/wrap-cli/crag-kernel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  })
+}
+
+export function setKernelDataplane(body: {
+  dataplane: 'wrap' | 'crag'
+  ids?: string[]
+  all?: boolean
+  restart?: boolean
+}) {
+  return api<WrapSyncReport & { dataplane?: 'wrap' | 'crag' }>(
+    '/api/panel/dataplane',
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }
+  )
+}
+

@@ -19,7 +19,12 @@ import {
   setVmSchedulable,
 } from '../vm/vm-registry.mjs'
 import { clearRecoverableVmCooldown } from '../oauth/oauth-credentials.mjs'
-import { resolveInferenceEngine, resolveSessionSlots, resolveSlotPersonaPreset } from '../vm/slot-engine.mjs'
+import {
+  resolveInferenceEngine,
+  resolveKernelDataplane,
+  resolveSessionSlots,
+  resolveSlotPersonaPreset,
+} from '../vm/slot-engine.mjs'
 import { probeAccount } from '../oauth/usage-probe.mjs'
 import { queryOpenaiQuota, resetOpenaiQuota } from '../oauth/openai-quota.mjs'
 import { canOfficialUsage, credentialModeOfVm } from '../oauth/credential-mode.mjs'
@@ -30,6 +35,7 @@ import { computeWeeklySplit, publicWeeklySplit, weeklySplitConfig } from '../poo
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
 import { inferClaudeTier } from '../pool/claude-tier.mjs'
 import { listQuotaFromHeaders } from '../pool/quota-window.mjs'
+import { hardBlockOf } from '../pool/rate-limit-service.mjs'
 import { resolveCredentialScheduleLevel } from '../pool/credential-weight.mjs'
 import {
   evaluateAccount,
@@ -39,7 +45,6 @@ import {
 } from '../pool/availability.mjs'
 import { isLeftoverGrantRevokeRuntime, viewRuntimeWithoutLeftoverRevoke } from '../pool/schedule-eligibility.mjs'
 import {
-  isFableUnavailablePro,
   isOfficialUsageRateLimited,
   PASSIVE_HEADER_SOURCE,
   probeFromPassiveHeaders,
@@ -763,28 +768,6 @@ export async function buildProbeOne({ cfg, accountQuota, id, force = false, usag
         ...(probeFromPassiveHeaders(acc?.unified || {}) || {}),
       }
     : await cache.load(accountId, () => probeAccount({ exec, vm, includeFable }), { force: !!force })
-  const usageListsFable = result.usage_has_fable === true || !!result.seven_day_oi
-  if (
-    !includeFable &&
-    !usageListsFable &&
-    (String(storedTier || '').toLowerCase() === 'pro' || isFableUnavailablePro(q.fable || {}, q))
-  ) {
-    result = {
-      ...result,
-      fable: {
-        ...(result.fable || {}),
-        model: 'claude-fable-5',
-        ok: false,
-        banned: false,
-        limited: false,
-        plan_denied: true,
-        status: result.fable?.status || 403,
-        error: 'plan_denied',
-        utilization: null,
-        reset_at: null,
-      },
-    }
-  }
   if (!skipHop) accountQuota.ingestOAuthUsage(accountId, result)
   const after = accountQuota.repo.get(accountId)
   const qAfter = quotaFromAccount(after)
@@ -1299,6 +1282,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     max: Number(v.max_sessions ?? policy.max_sessions ?? 0),
     idleMin: policy.session_idle_min,
   }) || { active: 0, max: Number(v.max_sessions ?? policy.max_sessions ?? 0), idle_min: policy.session_idle_min }
+  const liveHardBlock = hardBlockOf(runtime)
   const availability = evaluateAccount({
     vm: v,
     account: acc || {},
@@ -1316,6 +1300,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     quota: mergedQuota,
     policy,
     sessionLimit,
+    hardBlock: liveHardBlock,
     cooldownUntil:
       runtime?.cooldown_until ||
       v.claude?.temp_unschedulable_until ||
@@ -1330,6 +1315,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
       null,
   })
   const restrictionUntil =
+    liveHardBlock?.until ||
     runtime?.cooldown_until ||
     v.claude?.temp_unschedulable_until ||
     v.temp_unschedulable_until ||
@@ -1337,6 +1323,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     availability.until ||
     null
   const restrictionReason =
+    liveHardBlock?.reason ||
     runtime?.cooldown_reason ||
     v.claude?.temp_unschedulable_reason ||
     v.temp_unschedulable_reason ||
@@ -1359,8 +1346,10 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     kernel: v.kernel || null,
     inference_engine: v.inference_engine || null,
     persona_preset: v.persona_preset || null,
+    dataplane: v.dataplane || null,
     resolved_inference_engine: resolveInferenceEngine(v, extras.routingConfig || {}),
     resolved_persona_preset: resolveSlotPersonaPreset(v, extras.routingConfig || {}),
+    resolved_dataplane: resolveKernelDataplane(v, extras.routingConfig || {}),
     note: v.note || null,
     region: v.region || null,
     timezone: v.timezone || null,
