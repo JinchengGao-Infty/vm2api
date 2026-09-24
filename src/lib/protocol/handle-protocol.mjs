@@ -74,6 +74,7 @@ import { touchTelemetrySession } from '../vm/worker-telemetry.mjs'
 import {
   applyCrsIdentityReplace,
   extractCallerSession,
+  parseUserId,
   resolveOutboundSessionId,
   sessionContextDiscriminator,
 } from '../identity/identity-rewrite.mjs'
@@ -114,6 +115,7 @@ import {
   rewriteToolNames,
   restoreToolNames,
   restoreToolNamesInSSELine,
+  wantsFastMode,
 } from './anthropic-policy.mjs'
 import { materializeRemoteImageSources } from './images.mjs'
 
@@ -572,7 +574,8 @@ export function createHandleProtocol(deps) {
       clientDiscriminator,
       firstUserText,
     }
-    // Family device_id wins when already bound so a child hop cannot open a second VM session.
+    // device_id points a Haiku companion at this turn's session. API key does not.
+    const stickyDeviceId = String(parseUserId(inbound?.metadata?.user_id)?.device_id || '').trim()
     const stickyKey = stickyRouter?.extractPoolKey?.(req, inbound, { platform: 'anthropic' }) || null
     const stickyKeys = stickyRouter?.collectPoolKeys?.(req, inbound, { platform: 'anthropic' }) || []
     const stickyBound =
@@ -786,6 +789,7 @@ export function createHandleProtocol(deps) {
         model: canonicalBody.model,
         stickyKey,
         stickyKeys,
+        stickyDeviceId,
         pinVmId,
         ownerScope,
         countUsage: !healthReal,
@@ -1023,6 +1027,8 @@ export function createHandleProtocol(deps) {
     logBag.upstream_status = result?.status ?? null
     logBag.usage = result?.body?.usage || result?.usage || null
     if (logBag.usage && cacheTtl) logBag.usage = applyCacheTtlToUsage(logBag.usage, cacheTtl)
+    // Fast mode bills 2x; upstream usage.speed wins, the request speed is only a fallback.
+    if (logBag.usage && wantsFastMode(ctx.body)) logBag.usage = { ...logBag.usage, requested_speed: 'fast' }
     logBag.upstream_model = result?.body?.model || result?.model || null
     logBag.first_token_ms = result?.ttftMs ?? null
     logBag.stop_reason = result?.body?.stop_reason || result?.stopReason || null

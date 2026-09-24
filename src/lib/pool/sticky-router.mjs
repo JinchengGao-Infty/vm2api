@@ -107,6 +107,45 @@ export function firstUserFingerprint(body = {}) {
   return crypto.createHash('sha256').update(text).digest('hex').slice(0, 24)
 }
 
+/** Side queries spawned by a live parent turn. Not a new conversation. */
+export const COMPANION_PARENT_MS = 120_000
+
+function systemText(system) {
+  if (typeof system === 'string') return system
+  if (!Array.isArray(system)) return ''
+  return system.map((block) => (typeof block === 'string' ? block : block?.text || '')).join('\n')
+}
+
+function firstUserText(body = {}) {
+  const msgs = Array.isArray(body?.messages) ? body.messages : []
+  const user = msgs.find((m) => String(m?.role || '').toLowerCase() === 'user')
+  const content = user?.content
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  for (const part of content) {
+    if (typeof part === 'string' && part.trim()) return part.trim()
+    if (part?.type === 'text' && typeof part.text === 'string' && part.text.trim()) return part.text.trim()
+  }
+  return ''
+}
+
+/**
+ * Claude Code skill-routing / short Haiku hops.
+ * They carry a fresh session_id but belong to the parent turn that just ran.
+ */
+export function isParentSessionCompanion(body = {}) {
+  const model = String(body?.model || '').toLowerCase()
+  if (!model.includes('haiku')) return false
+  const msgs = Array.isArray(body?.messages) ? body.messages : []
+  if (msgs.length !== 1 || String(msgs[0]?.role || '').toLowerCase() !== 'user') return false
+  const tools = body?.tools
+  if (Array.isArray(tools) ? tools.length > 0 : !!tools) return false
+  if (firstUserText(body).startsWith('Compress into one routing hint')) return true
+  const system = systemText(body?.system)
+  if (!system || system.length > 800) return false
+  return /x-anthropic-billing-header/i.test(system) && /you are claude code/i.test(system)
+}
+
 export class StickyRouter {
   constructor({ dataDir, db, config }) {
     this.db = resolveStoreDb({ db, dataDir })
@@ -188,7 +227,11 @@ export class StickyRouter {
     return this.isolateKey(`dev:${device}`, req)
   }
 
-  /** Ordered aliases for one logical conversation. A caller session is the only key. */
+  /** Ordered aliases for one logical conversation. A caller session is the only key.
+   * A parent-session companion does not open its own slot: it reuses the live
+   * parent bound to the same device_id, or one device-family slot if none is live.
+   * API key only namespaces the row. It does not choose which parent.
+   */
   collectPoolKeys(req, body = {}, opts = {}) {
     if (!this.config.enabled) return []
     const keys = []
@@ -196,6 +239,20 @@ export class StickyRouter {
     const add = (key) => {
       const scoped = scopeStickyKey(key, platform)
       if (scoped && !keys.includes(scoped)) keys.push(scoped)
+    }
+    if (isParentSessionCompanion(body)) {
+      const device = String(parseUserId(body?.metadata?.user_id)?.device_id || '').trim()
+      const parent = device
+        ? this.latestParentPoolKey(req, { platform: platform || 'anthropic', deviceId: device })
+        : null
+      if (parent) {
+        add(parent)
+        return keys
+      }
+      if (device) {
+        add(this.isolateKey(`fam:${device}`, req))
+        return keys
+      }
     }
     const caller = extractCallerSession({ inbound: body, body, headers: req?.headers || {} })
     if (caller && !EPHEMERAL_STICKY_KEYS.has(String(caller).toLowerCase())) {
@@ -211,6 +268,36 @@ export class StickyRouter {
     const fingerprint = firstUserFingerprint(body)
     if (fingerprint) add(this.isolateKey(`ch:${fingerprint}`, req))
     return keys
+  }
+
+  /** Live parent for this device_id. Companions must not inherit fam:/alias rows
+   * or another device's session on the same API key.
+   */
+  latestParentPoolKey(
+    req,
+    { platform = 'anthropic', now = Date.now(), withinMs = COMPANION_PARENT_MS, deviceId = '' } = {},
+  ) {
+    const device = String(deviceId || '').trim()
+    if (!device) return null
+    const id = req?.apiKeyRecord?.id
+    if (id == null || id === '') return null
+    const prefix = scopeStickyKey(this.isolateKey('', req), platform)
+    if (!prefix) return null
+    let best = null
+    let bestAt = 0
+    for (const [key, ent] of Object.entries(this.repo.all())) {
+      if (!key.startsWith(prefix)) continue
+      const rest = key.slice(prefix.length)
+      if (!rest || /^(fam:|ch:|dev:|envelope$|login$)/.test(rest)) continue
+      if (String(ent?.device_id || '') !== device) continue
+      if (!ent?.expires_at || now > ent.expires_at) continue
+      const at = Number(ent.bound_at) || 0
+      if (now - at > withinMs) continue
+      if (at < bestAt) continue
+      bestAt = at
+      best = key
+    }
+    return best
   }
 
   /**
@@ -241,15 +328,17 @@ export class StickyRouter {
     return { accountId: ent.account_id, vmId: ent.vm_id, sessionId: ent.session_id || null, key }
   }
 
-  bind(key, { accountId, vmId, sessionId = null } = {}, { countHit = true } = {}) {
+  bind(key, { accountId, vmId, sessionId = null, deviceId = null } = {}, { countHit = true } = {}) {
     if (!key || !this.config.enabled) return
     const ttl = (this.config.ttl_seconds || 86400) * 1000
     const prev = this.repo.get(key) || {}
     const locked = prev.vm_id && vmId && prev.vm_id !== vmId
+    const device = String(deviceId || '').trim()
     this.repo.upsert(key, {
       account_id: locked ? prev.account_id : accountId,
       vm_id: locked ? prev.vm_id : vmId,
       session_id: prev.session_id || sessionId || null,
+      device_id: device || null,
       bound_at: Date.now(),
       expires_at: Date.now() + ttl,
       hits: (prev.hits || 0) + (countHit ? 1 : 0),
