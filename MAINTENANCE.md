@@ -153,3 +153,11 @@ VM2 默认缓存保持 `1h`，两槽 `kernel.json` 的 `default_cache_ttl` 均�
 本机 Claude Code 沿用保存的 `claude-opus-5-5[1m]`，实际依次执行两次 Bash 后返回 `VM2_1342_OK`。对应三次请求全部 HTTP 200；客户端原始缓存读取 0 → 7,978 → 8,084，写入 7,978 / 106 / 106，全部为 1h，5m 为零，未缓存输入每次 2 tokens。客户端报告 `contextWindow=1000000`。验证会话 `0c12b0a4-0ae3-454c-b9be-427e8faa9100`，证据目录 `~/.omp/reports/vm2api-upgrade-1.3.42/`。没有进行百万 token 的大请求。
 
 本次额外核查发现：当前 `credentials.json` 的 scopes 只有 `user:inference`，槽内官方 `/api/oauth/usage` 返回 HTTP 403 `oauth_scope_insufficient`，要求 `user:profile`。调用使用的就是该凭证路径，属于当前授权范围限制；聊天和工具调用已实际成功，不把此结果解释为账号不可用。未更换登录凭证、强制刷新或调整权限。后续若要恢复主动额度查询，需要具有相应 profile 权限的 OAuth 登录。
+
+## 升级到上游 1.3.49（2026-09-25）
+
+用户确认升级后，无冲突合入 v1.3.49，合并提交 `e41af6c`。生产采用固定官方镜像 `ghcr.io/dofastted/vm2api:v1.3.49`，继续使用 wrap。此次上游更新包括旧 CPU 的 CLI 指令集兼容、空输出重试与过载判定、Codex 用量报告及路由设置保存修复；没有增加自用协议补丁。
+
+升级前确认在途请求为零、20 个执行位全部空闲。备份 `/opt/vm2api/backups/upgrade-1.3.49-20260924T162801Z/` 保存运行文件、在线数据库、切换前数据库、容器信息及升级前后内核健康记录。新版文件从官方镜像提取到 `/opt/vm2api-release-1.3.49`，同步至 `/opt/vm2api` 后重建控制面；上游自动同步日志显示 `2/2, failed=0`。vm-01 实际 CLI 进程已加载新版 34,287,864 字节文件，健康返回 `ready_slots=20`、`wedged_slots=0`、凭证 fresh、CLI 2.1.280；vm-02 保持停止。
+
+`.env`、`routing.json`、`distill-rules.json` 保留原内容；账号、Key、出口、额度阈值和 1h 缓存保留。Claude Code 沿用已配置的 `claude-opus-5-5[1m]`，实际完成两次 Bash 调用后返回 `VM2_1349_OK`。三轮客户端原始 usage 中缓存读取为 0 → 42,359 → 42,465 tokens，写入为 42,359 / 106 / 106 tokens，全部计入 1h，5m 写入均为零，未缓存输入每轮 2 tokens。客户端报告上下文容量 1,000,000。证据目录为 `~/.omp/reports/vm2api-upgrade-1.3.49/`。
