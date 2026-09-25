@@ -175,3 +175,9 @@ VM2 默认缓存保持 `1h`，两槽 `kernel.json` 的 `default_cache_ttl` 均�
 用户确认同一 Claude 账号已从 Pro 升到 Max，但 VM2 账号卡片仍显示 Pro。实查 `/api/panel/vms` 返回 `account_tier=unknown`，而上游 `web/src/lib/vm-status.ts` 的 `claudeTier()` 将未知套餐默认渲染为 Pro。槽内凭证仅含 `user:inference`；通过现有 worker 调用官方 profile 返回 403 `oauth_scope_insufficient`，要求 `user:profile` 或 `user:office`。因此此前“请求成功即可确认套餐同步”的判断不成立。
 
 按用户确认的信息，用上游 `AccountQuota.setAccountTier()` 和 `persistAccountTier()` 将账号数据库及 vm-01 记录同步为 `max`，来源保存为 `user-confirmed`，没有冒充官方 profile 核验结果。原记录备份位于 `/opt/vm2api/data/backups/max-tier-2026-09-25T06-46-49.683Z/`。不更换凭证、不重启服务、不改客户端 Key；官方套餐自动识别仍需带 profile 权限的授权。应用代码继续采用上游原版。
+
+### 补齐套餐对应的并发同步
+
+首次同步遗漏了上游独立的 `applyRoutingTierConcurrency()` 流程，账号卡片和持久化的并发字段仍为 2。现有套餐规则为 Pro=2、Max=4；调度器会按套餐解析有效上限，但登记值也需要同步，不能只更新套餐标签就宣称处理完整。
+
+通过原有 `PUT /api/panel/routing` 重应用既有 Max 并发 4 规则，返回 `applied_concurrency.max=1`。确认运行中面板返回 `account_tier=max, max_concurrency=4`，vm-01 的 `policy.maxConcurrency` 和有效账号数据库的 `concurrency` 均为 4；两处 override 均保持关闭，继续自动跟随套餐规则。vm-02 仍停止、并发 2。未重启服务、未修改凭证或应用代码。回退记录位于 `/opt/vm2api/backups/max-concurrency-20260925T070040Z/`。
