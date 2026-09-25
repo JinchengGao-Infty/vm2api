@@ -181,3 +181,13 @@ VM2 默认缓存保持 `1h`，两槽 `kernel.json` 的 `default_cache_ttl` 均�
 首次同步遗漏了上游独立的 `applyRoutingTierConcurrency()` 流程，账号卡片和持久化的并发字段仍为 2。现有套餐规则为 Pro=2、Max=4；调度器会按套餐解析有效上限，但登记值也需要同步，不能只更新套餐标签就宣称处理完整。
 
 通过原有 `PUT /api/panel/routing` 重应用既有 Max 并发 4 规则，返回 `applied_concurrency.max=1`。确认运行中面板返回 `account_tier=max, max_concurrency=4`，vm-01 的 `policy.maxConcurrency` 和有效账号数据库的 `concurrency` 均为 4；两处 override 均保持关闭，继续自动跟随套餐规则。vm-02 仍停止、并发 2。未重启服务、未修改凭证或应用代码。回退记录位于 `/opt/vm2api/backups/max-concurrency-20260925T070040Z/`。
+
+## 升级到上游 1.3.53（2026-09-25）
+
+维护分支无冲突合入 v1.3.53，提交 `84c32b2`。1.3.50–53 主要改进槽位熔断与空响应处理：一次空跳在同号重试后返回错误，不再立即停调或换号；仍活着的 CLI 不会因无可见输出被监督进程误杀。本分支的应用源码继续采用上游原版，额外文件只有 AGENTS.md 和维护记录。
+
+生产使用官方镜像 `ghcr.io/dofastted/vm2api:v1.3.53`。切换前确认 vm-01 无在途请求、20 个执行位空闲，备份位于 `/opt/vm2api/backups/upgrade-1.3.53-20260925T102903Z/`，其中在线 SQLite 备份压缩为 `kin.db.gz`。重建控制面时临时设 `KIN_AUTO_SYNC_WRAP=0`，因为新增的可选 `cc-node` 会让启动脚本误以为当前在用的 wrap 二进制也需要同步；实际使用的 `cli-node`、kernel 在 1.3.49→1.3.53 间未变化。kin-01 的容器启动时间、运行中 CLI PID 均未改变。服务器宿主的控制面源码、脚本、前端构建和 VERSION 已从当前官方镜像同步，快照在 `/opt/vm2api-release-1.3.53/`；用户配置目录没有覆盖。
+
+运行中控制面版本为 1.3.53；vm-01 仍为 Max、并发 4、容器内存 2 GiB，`compatibility.cache_ttl=1h`。实际 Claude Code 2.1.282 使用 `claude-opus-5-5[1m]` 完成一次 Bash 工具循环并返回 `VM2_1353_OK`。两轮原始客户端用量：第一轮 14,726 个 1h 缓存写入 token；第二轮读取 14,726、再写入 109 个 1h token，5m 写入为零。记录位于本机 `~/.omp/reports/vm2api-upgrade-1.3.53/`。
+
+升级时服务器磁盘仅剩约 0.5–0.7 GiB；压缩本次数据库备份后，清理了 1.111 GiB 未使用的 Docker 构建缓存，空闲空间回到约 1.7 GiB。历史部署备份和旧镜像保留。
