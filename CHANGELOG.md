@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.53 — 2026-09-25
+
+- 没有可见输出的跳不再回收内核。以前这会被当成槽泄漏，`SIGKILL` 监督进程里的 CLI 并重启内核，同槽重试打在刚被拉起的进程上。
+- 传输失败和连接错误仍会回收。crag / cc-node 还活着时，看门狗不再重启该槽。
+
+已部署机升级：只覆盖控制面并重启 Node 一次。二进制未变，不必 `wrap-cli/sync`。不要 `docker rm` 槽。
+
+## 1.3.52 — 2026-09-25
+
+- 空跳或只有 thinking、没有 `stop_reason` 的请求，同号重试一次后返回 502 `incomplete_response`。这一次请求不再停调、不换号。同一个号在另一次请求里再次空跳，才暂停该号 60 秒。（#131）
+- 入站体上限默认 128MB。超限在选号前返回 413 `body_too_large`。（#131）
+- Codex 模型同步带上 `gpt-6-sol` 和 `gpt-6-luna`。（#131）
+- Haiku 的 cli-hop 在 thinking 关闭时丢掉 `context_management`，避免旁路请求把槽打成 502 后拖垮号池。（#121）
+- 「不要透露隐藏推理」这类否定句不再被蒸馏守卫拦成 403。（#129）
+
+已部署机升级：只覆盖控制面并重启 Node 一次。二进制未变，不必 `wrap-cli/sync`。不要 `docker rm` 槽。
+
+## 1.3.51 — 2026-09-25
+
+- crag 不再把写死的 “persistent Crag request slot” 当作 agent 提示词。系统内容改跟槽位人设：0 注入、官方提示词、完整官方提示词。
+- 本版 `kin-kernel-crag` 换成去掉该提示词的内核。`cli-node` 和 `cc-node` 未变。
+
+已部署机升级：只换 crag kernel。内核页拉取 GitHub 后，按 crag + cc-node 重装。不要 `docker rm` 槽。
+
+## 1.3.50 — 2026-09-25
+
+- 内核页三种搭配：默认 `cli-node + kernel`；`cc-node + kernel` 用同一份 wrap kernel；`crag + cc-node` 用 crag kernel，`claude_bin` 指向仓内 `cc-node`。
+- GitHub 拉取必须同时下载 `kin-kernel`、`cli-node`、`cc-node`、`kin-kernel-crag`。本版 Release 带上 `cc-node`（Claude Code 2.1.281，UPX）和更新后的 crag kernel。
+- 计费回填不再把故意未标价的行按标准价重算，面板显示计费档。（#125）
+- 面板显示 Claude 槽位熔断，并可以手动复位。扫描候选槽不再吃掉半开探测。（#126）
+- Codex 对话的工具调用继续走 Responses 清洗。Codex 故障切换仍只用自己的错误集。
+
+已部署机升级：`cc-node` 是新二进制，crag kernel 也换了。镜像安装拉新镜像并重启控制面。源码安装覆盖控制面、`share/wrap-cli/cli-node`、`share/wrap-cli/cc-node` 和 `share/crag/kin-kernel`，重启 Node 一次，然后到内核页重装。不要 `docker rm` 槽。
+
 ## 1.3.49 — 2026-09-24
 
 - `share/wrap-cli/cli-node` 改为 Bun `bun-linux-x64-baseline` 重编（同 patch、同 Bun 1.3.14，UPX 5.0.1）。不支持 AVX2 / BMI2 的 CPU 不再在槽内 SIGILL，也不再只报 `wrap cli-hop 未就绪`。（#122）
