@@ -169,3 +169,9 @@ VM2 默认缓存保持 `1h`，两槽 `kernel.json` 的 `default_cache_ttl` 均�
 用户只有一个运行账号，授权提高内存。通过 `docker update --memory 2g --memory-swap 2g kin-01` 在线增加上限；宿主约 4 GiB 内存。`.env` 保存 `KIN_VM_MEMORY=2g`，通过上游 routing API 将 `official_cc.memory` 改为 `2g`，并用上游 helper 保存 vm-01 的 `runtime.memory`。确认无在途请求后，仅重建控制面以加载环境变量；kin-01 的启动时间和宿主 PID 均保持不变，未重启账号容器或 CLI。vm-02 继续停止。
 
 运行中 Docker 限额和控制面环境已确认均为 2 GiB，凭证 fresh、无卡死执行位，1h 缓存保留。实际 OMP → VM2 → Opus 5.5 请求返回 `VM2_MEMORY_OK`，新增缓存写入为 7,165 个 1h tokens。远端配置备份与验证记录位于 `/opt/vm2api/backups/single-account-memory-2g-20260925T022132Z/`，本机请求记录位于 `~/.omp/reports/vm2api-memory-2g-20260925/`。后续部署须保留 `.env` 的 `KIN_VM_MEMORY=2g` 和 `official_cc.memory=2g`，避免恢复为上游 500 MiB 默认值。应用代码仍采用上游原版。
+
+## 同步用户确认的 Max 套餐（2026-09-25）
+
+用户确认同一 Claude 账号已从 Pro 升到 Max，但 VM2 账号卡片仍显示 Pro。实查 `/api/panel/vms` 返回 `account_tier=unknown`，而上游 `web/src/lib/vm-status.ts` 的 `claudeTier()` 将未知套餐默认渲染为 Pro。槽内凭证仅含 `user:inference`；通过现有 worker 调用官方 profile 返回 403 `oauth_scope_insufficient`，要求 `user:profile` 或 `user:office`。因此此前“请求成功即可确认套餐同步”的判断不成立。
+
+按用户确认的信息，用上游 `AccountQuota.setAccountTier()` 和 `persistAccountTier()` 将账号数据库及 vm-01 记录同步为 `max`，来源保存为 `user-confirmed`，没有冒充官方 profile 核验结果。原记录备份位于 `/opt/vm2api/data/backups/max-tier-2026-09-25T06-46-49.683Z/`。不更换凭证、不重启服务、不改客户端 Key；官方套餐自动识别仍需带 profile 权限的授权。应用代码继续采用上游原版。
