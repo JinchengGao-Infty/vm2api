@@ -161,3 +161,11 @@ VM2 默认缓存保持 `1h`，两槽 `kernel.json` 的 `default_cache_ttl` 均�
 升级前确认在途请求为零、20 个执行位全部空闲。备份 `/opt/vm2api/backups/upgrade-1.3.49-20260924T162801Z/` 保存运行文件、在线数据库、切换前数据库、容器信息及升级前后内核健康记录。新版文件从官方镜像提取到 `/opt/vm2api-release-1.3.49`，同步至 `/opt/vm2api` 后重建控制面；上游自动同步日志显示 `2/2, failed=0`。vm-01 实际 CLI 进程已加载新版 34,287,864 字节文件，健康返回 `ready_slots=20`、`wedged_slots=0`、凭证 fresh、CLI 2.1.280；vm-02 保持停止。
 
 `.env`、`routing.json`、`distill-rules.json` 保留原内容；账号、Key、出口、额度阈值和 1h 缓存保留。Claude Code 沿用已配置的 `claude-opus-5-5[1m]`，实际完成两次 Bash 调用后返回 `VM2_1349_OK`。三轮客户端原始 usage 中缓存读取为 0 → 42,359 → 42,465 tokens，写入为 42,359 / 106 / 106 tokens，全部计入 1h，5m 写入均为零，未缓存输入每轮 2 tokens。客户端报告上下文容量 1,000,000。证据目录为 `~/.omp/reports/vm2api-upgrade-1.3.49/`。
+
+## 单账号容器内存提高到 2 GiB（2026-09-25）
+
+北京时间 10:09:33，宿主内核日志明确记录 kin-01 达到 500 MiB cgroup 上限，OOM killer 杀掉 `cli-node`；请求停滞后，10:11:35 Cloudflare 返回 524。10:12:35 账号容器已重启。随后同一账号 Opus 5.5 实际请求成功，故障原因是容器内存限制。
+
+用户只有一个运行账号，授权提高内存。通过 `docker update --memory 2g --memory-swap 2g kin-01` 在线增加上限；宿主约 4 GiB 内存。`.env` 保存 `KIN_VM_MEMORY=2g`，通过上游 routing API 将 `official_cc.memory` 改为 `2g`，并用上游 helper 保存 vm-01 的 `runtime.memory`。确认无在途请求后，仅重建控制面以加载环境变量；kin-01 的启动时间和宿主 PID 均保持不变，未重启账号容器或 CLI。vm-02 继续停止。
+
+运行中 Docker 限额和控制面环境已确认均为 2 GiB，凭证 fresh、无卡死执行位，1h 缓存保留。实际 OMP → VM2 → Opus 5.5 请求返回 `VM2_MEMORY_OK`，新增缓存写入为 7,165 个 1h tokens。远端配置备份与验证记录位于 `/opt/vm2api/backups/single-account-memory-2g-20260925T022132Z/`，本机请求记录位于 `~/.omp/reports/vm2api-memory-2g-20260925/`。后续部署须保留 `.env` 的 `KIN_VM_MEMORY=2g` 和 `official_cc.memory=2g`，避免恢复为上游 500 MiB 默认值。应用代码仍采用上游原版。
